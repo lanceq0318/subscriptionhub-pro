@@ -9,6 +9,8 @@ import {
 } from 'react';
 import { useRouter } from 'next/navigation';
 
+type SubscriptionForm = Omit<Subscription, 'id' | 'cost'> & { cost: string };
+
 type FileAttachment = {
   id: string;
   name: string;
@@ -92,7 +94,8 @@ export default function Dashboard() {
   const [currentTags, setCurrentTags] = useState<string[]>([]);
   const [tagInput, setTagInput] = useState('');
 
-  const [formData, setFormData] = useState<Omit<Subscription, 'id'> & { cost: string }>({
+  // ✅ Use SubscriptionForm (cost as string) to avoid the "never" type issue
+  const [formData, setFormData] = useState<SubscriptionForm>({
     company: 'Kisamos',
     service: '',
     cost: '',
@@ -435,8 +438,9 @@ export default function Dashboard() {
     setEditingId(null);
   };
 
+  // ✅ Strip numeric cost from spread to satisfy SubscriptionForm
   const handleEdit = (sub: Subscription) => {
-    const { id: _, ...rest } = sub;
+    const { id: _id, cost: _ignore, ...rest } = sub;
     setFormData({ ...rest, cost: sub.cost.toString() });
     setCurrentTags(sub.tags || []);
     setEditingId(sub.id);
@@ -2072,7 +2076,7 @@ const FormModal = ({ editingId, formData, setFormData, currentTags, tagInput, se
           <FormField label="Company" required>
             <select
               value={formData.company}
-              onChange={e => setFormData({...formData, company: e.target.value})}
+              onChange={e => setFormData({ ...formData, company: e.target.value as Company })}
               required
               style={inputStyle}>
               {COMPANIES.map((c: string) => (
@@ -2085,7 +2089,7 @@ const FormModal = ({ editingId, formData, setFormData, currentTags, tagInput, se
             <input
               type="text"
               value={formData.service}
-              onChange={e => setFormData({...formData, service: e.target.value})}
+              onChange={e => setFormData({ ...formData, service: e.target.value })}
               placeholder="e.g., Microsoft 365"
               required
               style={inputStyle}
@@ -2097,7 +2101,7 @@ const FormModal = ({ editingId, formData, setFormData, currentTags, tagInput, se
               type="number"
               step="0.01"
               value={formData.cost}
-              onChange={e => setFormData({...formData, cost: e.target.value})}
+              onChange={e => setFormData({ ...formData, cost: e.target.value })}
               placeholder="99.99"
               required
               style={inputStyle}
@@ -2107,7 +2111,7 @@ const FormModal = ({ editingId, formData, setFormData, currentTags, tagInput, se
           <FormField label="Billing Cycle">
             <select
               value={formData.billing}
-              onChange={e => setFormData({...formData, billing: e.target.value})}
+              onChange={e => setFormData({ ...formData, billing: e.target.value as Subscription['billing'] })}
               style={inputStyle}>
               <option value="monthly">Monthly</option>
               <option value="quarterly">Quarterly</option>
@@ -2118,7 +2122,7 @@ const FormModal = ({ editingId, formData, setFormData, currentTags, tagInput, se
           <FormField label="Category">
             <select
               value={formData.category}
-              onChange={e => setFormData({...formData, category: e.target.value})}
+              onChange={e => setFormData({ ...formData, category: e.target.value })}
               style={inputStyle}>
               {CATEGORIES.map((c: string) => (
                 <option key={c} value={c}>{c}</option>
@@ -2129,7 +2133,7 @@ const FormModal = ({ editingId, formData, setFormData, currentTags, tagInput, se
           <FormField label="Payment Status">
             <select
               value={formData.lastPaymentStatus}
-              onChange={e => setFormData({...formData, lastPaymentStatus: e.target.value})}
+              onChange={e => setFormData({ ...formData, lastPaymentStatus: e.target.value as Subscription['lastPaymentStatus'] })}
               style={inputStyle}>
               <option value="paid">Paid</option>
               <option value="pending">Pending</option>
@@ -2141,7 +2145,7 @@ const FormModal = ({ editingId, formData, setFormData, currentTags, tagInput, se
             <input
               type="date"
               value={formData.nextBilling || ''}
-              onChange={e => setFormData({...formData, nextBilling: e.target.value})}
+              onChange={e => setFormData({ ...formData, nextBilling: e.target.value })}
               style={inputStyle}
             />
           </FormField>
@@ -2150,7 +2154,7 @@ const FormModal = ({ editingId, formData, setFormData, currentTags, tagInput, se
             <input
               type="date"
               value={formData.contractEnd || ''}
-              onChange={e => setFormData({...formData, contractEnd: e.target.value})}
+              onChange={e => setFormData({ ...formData, contractEnd: e.target.value })}
               style={inputStyle}
             />
           </FormField>
@@ -2158,7 +2162,7 @@ const FormModal = ({ editingId, formData, setFormData, currentTags, tagInput, se
           <FormField label="Payment Method">
             <select
               value={formData.paymentMethod}
-              onChange={e => setFormData({...formData, paymentMethod: e.target.value})}
+              onChange={e => setFormData({ ...formData, paymentMethod: e.target.value })}
               style={inputStyle}>
               {PAYMENT_METHODS.map((m: string) => (
                 <option key={m} value={m}>{m}</option>
@@ -2170,7 +2174,7 @@ const FormModal = ({ editingId, formData, setFormData, currentTags, tagInput, se
             <input
               type="text"
               value={formData.manager || ''}
-              onChange={e => setFormData({...formData, manager: e.target.value})}
+              onChange={e => setFormData({ ...formData, manager: e.target.value })}
               placeholder="Optional"
               style={inputStyle}
             />
@@ -2180,7 +2184,7 @@ const FormModal = ({ editingId, formData, setFormData, currentTags, tagInput, se
             <input
               type="number"
               value={formData.renewalAlert}
-              onChange={e => setFormData({...formData, renewalAlert: parseInt(e.target.value) || 30})}
+              onChange={e => setFormData({ ...formData, renewalAlert: parseInt(e.target.value) || 30 })}
               min="0"
               style={inputStyle}
             />
@@ -2190,7 +2194,7 @@ const FormModal = ({ editingId, formData, setFormData, currentTags, tagInput, se
             <input
               type="number"
               value={formData.usage || ''}
-              onChange={e => setFormData({...formData, usage: parseInt(e.target.value) || undefined})}
+              onChange={e => setFormData({ ...formData, usage: parseInt(e.target.value) || undefined })}
               placeholder="0-100"
               min="0"
               max="100"
@@ -2309,7 +2313,7 @@ const FormModal = ({ editingId, formData, setFormData, currentTags, tagInput, se
                       type="button"
                       onClick={() => {
                         const filtered = (formData.attachments || []).filter((a: any) => a.id !== att.id);
-                        setFormData({...formData, attachments: filtered});
+                        setFormData({ ...formData, attachments: filtered });
                       }}
                       style={{
                         padding: '4px 8px',
@@ -2334,7 +2338,7 @@ const FormModal = ({ editingId, formData, setFormData, currentTags, tagInput, se
           <FormField label="Notes" optional>
             <textarea
               value={formData.notes || ''}
-              onChange={e => setFormData({...formData, notes: e.target.value})}
+              onChange={e => setFormData({ ...formData, notes: e.target.value })}
               placeholder="Additional information about this subscription..."
               rows={3}
               style={{ ...inputStyle, resize: 'vertical' }}

@@ -1,25 +1,15 @@
-import { NextResponse } from 'next/server';
-import type { NextRequest } from 'next/server';
+// middleware.ts
+import { withAuth } from "next-auth/middleware"
 
-export function middleware(req: NextRequest) {
-  const isLoggedIn = req.cookies.get('isLoggedIn')?.value === 'true';
-  const { pathname } = req.nextUrl;
+export default withAuth({
+  pages: {
+    signIn: '/login',
+  },
+})
 
-  // protect dashboard
-  if (pathname.startsWith('/dashboard') && !isLoggedIn) {
-    const url = new URL('/login', req.url);
-    url.searchParams.set('callbackUrl', pathname);
-    return NextResponse.redirect(url);
-  }
-
-  // block /login if already logged in
-  if (pathname === '/login' && isLoggedIn) {
-    return NextResponse.redirect(new URL('/dashboard', req.url));
-  }
-
-  return NextResponse.next();
-}
-
+// Protect all routes except login and api/auth
 export const config = {
-  matcher: ['/dashboard/:path*', '/login'],
-};
+  matcher: [
+    '/((?!api/auth|login|_next/static|_next/image|favicon.ico).*)',
+  ],
+}
