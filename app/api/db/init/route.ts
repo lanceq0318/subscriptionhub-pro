@@ -3,7 +3,6 @@ import { NextResponse } from 'next/server';
 
 export async function GET() {
   try {
-    // Create subscriptions table
     await sql`
       CREATE TABLE IF NOT EXISTS subscriptions (
         id SERIAL PRIMARY KEY,
@@ -18,7 +17,6 @@ export async function GET() {
         renewal_alert INTEGER DEFAULT 30,
         status VARCHAR(20) DEFAULT 'active',
         payment_method VARCHAR(50),
-        usage INTEGER,
         notes TEXT,
         last_payment_status VARCHAR(20) DEFAULT 'pending',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -26,7 +24,6 @@ export async function GET() {
       );
     `;
 
-    // Create tags table
     await sql`
       CREATE TABLE IF NOT EXISTS subscription_tags (
         id SERIAL PRIMARY KEY,
@@ -35,7 +32,6 @@ export async function GET() {
       );
     `;
 
-    // Create attachments table
     await sql`
       CREATE TABLE IF NOT EXISTS attachments (
         id SERIAL PRIMARY KEY,
@@ -49,7 +45,6 @@ export async function GET() {
       );
     `;
 
-    // Create payments table
     await sql`
       CREATE TABLE IF NOT EXISTS payments (
         id SERIAL PRIMARY KEY,
@@ -61,6 +56,12 @@ export async function GET() {
         reference VARCHAR(100)
       );
     `;
+
+    -- helpful indexes
+    await sql`CREATE INDEX IF NOT EXISTS idx_subscriptions_next_billing ON subscriptions(next_billing);`;
+    await sql`CREATE INDEX IF NOT EXISTS idx_subscriptions_status ON subscriptions(status);`;
+    await sql`CREATE INDEX IF NOT EXISTS idx_subscriptions_last_payment_status ON subscriptions(last_payment_status);`;
+    await sql`CREATE INDEX IF NOT EXISTS idx_subscriptions_company ON subscriptions(company);`;
 
     return NextResponse.json({ message: 'Database initialized successfully' });
   } catch (error) {
