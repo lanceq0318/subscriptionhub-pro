@@ -1,8 +1,6 @@
 import NextAuth, { type NextAuthOptions } from "next-auth";
 import AzureADProvider from "next-auth/providers/azure-ad";
 
-export const runtime = "nodejs";
-
 const authOptions: NextAuthOptions = {
   providers: [
     AzureADProvider({
@@ -11,40 +9,39 @@ const authOptions: NextAuthOptions = {
       tenantId: process.env.AZURE_AD_TENANT_ID!,
       authorization: {
         params: {
-          scope: "openid profile email User.Read"
+          scope: "openid profile email User.Read",
         }
       }
     }),
   ],
   pages: {
-    signIn: '/login',  // Use custom login page
-    error: '/login',   // Redirect errors to login
+    signIn: '/login',
   },
-  secret: process.env.NEXTAUTH_SECRET,
+  secret: process.env.NEXTAUTH_SECRET!,
   session: { 
     strategy: "jwt",
-    maxAge: 30 * 24 * 60 * 60, // 30 days
+    maxAge: 8 * 60 * 60, // 8 hours
   },
   callbacks: {
     async jwt({ token, account, user }) {
-      if (account && user) {
+      if (account) {
         token.accessToken = account.access_token;
-        token.userId = user.id;
-        token.userEmail = user.email;
+        token.refreshToken = account.refresh_token;
+        token.expiresAt = account.expires_at;
+      }
+      if (user) {
+        token.email = user.email;
+        token.name = user.name;
       }
       return token;
     },
     async session({ session, token }) {
-      if (session.user) {
-        session.user.email = token.userEmail as string;
-      }
+      session.user = {
+        email: token.email as string,
+        name: token.name as string,
+      };
       return session;
     },
-    async redirect({ url, baseUrl }) {
-      // Always redirect to dashboard after sign in
-      if (url.startsWith(baseUrl)) return url;
-      return baseUrl + '/dashboard';
-    }
   },
 };
 
