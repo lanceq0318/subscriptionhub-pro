@@ -1,81 +1,148 @@
-'use client'
+'use client';
 
-import { Suspense } from 'react'
-import { signIn } from 'next-auth/react'
-import { useSearchParams } from 'next/navigation'
-import { useState } from 'react'
+import { signIn } from 'next-auth/react';
+import { useSearchParams } from 'next/navigation';
+import { Suspense } from 'react';
 
-function LoginForm() {
-  const [isLoading, setIsLoading] = useState(false)
-  const searchParams = useSearchParams()
-  const callbackUrl = searchParams.get('callbackUrl') || '/dashboard'
-
-  const handleSignIn = async () => {
-    setIsLoading(true)
-    try {
-      await signIn('azure-ad', { callbackUrl })
-    } catch (error) {
-      console.error('Sign in error:', error)
-      setIsLoading(false)
-    }
-  }
+function LoginContent() {
+  const searchParams = useSearchParams();
+  const callbackUrl = searchParams.get('callbackUrl') || '/dashboard';
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-50">
-      <div className="max-w-md w-full space-y-8">
-        <div>
-          <h2 className="mt-6 text-center text-3xl font-extrabold text-gray-900">
-            Sign in to your account
-          </h2>
-          <p className="mt-2 text-center text-sm text-gray-600">
-            Use your Microsoft work account to continue
+    <div style={{
+      minHeight: '100vh',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+      padding: '20px'
+    }}>
+      <div style={{
+        background: 'white',
+        borderRadius: '16px',
+        boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
+        width: '100%',
+        maxWidth: '400px',
+        padding: '48px',
+        textAlign: 'center'
+      }}>
+        {/* Logo */}
+        <div style={{
+          width: '80px',
+          height: '80px',
+          background: 'linear-gradient(135deg, #4F46E5 0%, #7C3AED 100%)',
+          borderRadius: '16px',
+          margin: '0 auto 24px',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center'
+        }}>
+          <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2">
+            <rect x="3" y="3" width="7" height="7" />
+            <rect x="14" y="3" width="7" height="7" />
+            <rect x="14" y="14" width="7" height="7" />
+            <rect x="3" y="14" width="7" height="7" />
+          </svg>
+        </div>
+
+        <h1 style={{
+          fontSize: '28px',
+          fontWeight: '700',
+          color: '#111827',
+          marginBottom: '8px'
+        }}>
+          SubscriptionHub Pro
+        </h1>
+        
+        <p style={{
+          color: '#6B7280',
+          fontSize: '16px',
+          marginBottom: '32px'
+        }}>
+          Enterprise Subscription Management
+        </p>
+
+        {/* Azure AD Sign In Button */}
+        <button
+          onClick={() => signIn('azure-ad', { callbackUrl })}
+          style={{
+            width: '100%',
+            padding: '14px',
+            background: '#0078d4',
+            color: 'white',
+            border: 'none',
+            borderRadius: '8px',
+            fontSize: '16px',
+            fontWeight: '600',
+            cursor: 'pointer',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: '12px',
+            transition: 'background 0.2s',
+            marginBottom: '16px'
+          }}
+          onMouseEnter={e => e.currentTarget.style.background = '#106ebe'}
+          onMouseLeave={e => e.currentTarget.style.background = '#0078d4'}
+        >
+          {/* Microsoft Logo */}
+          <svg width="20" height="20" viewBox="0 0 21 21" fill="currentColor">
+            <path d="M10 0H0v10h10V0z"/>
+            <path d="M21 0H11v10h10V0z" opacity="0.8"/>
+            <path d="M10 11H0v10h10V11z" opacity="0.6"/>
+            <path d="M21 11H11v10h10V11z" opacity="0.4"/>
+          </svg>
+          Sign in with Microsoft
+        </button>
+
+        <div style={{
+          marginTop: '24px',
+          paddingTop: '24px',
+          borderTop: '1px solid #E5E7EB'
+        }}>
+          <p style={{
+            fontSize: '12px',
+            color: '#9CA3AF',
+            lineHeight: '1.5'
+          }}>
+            Use your corporate Microsoft account to access the subscription management system.
           </p>
         </div>
-        <div>
-          <button
-            onClick={handleSignIn}
-            disabled={isLoading}
-            className="group relative w-full flex justify-center py-3 px-4 border border-transparent text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            {isLoading ? (
-              <span className="flex items-center">
-                <svg className="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                </svg>
-                Signing in...
-              </span>
-            ) : (
-              <span className="flex items-center">
-                <svg className="w-5 h-5 mr-2" viewBox="0 0 21 21" fill="currentColor">
-                  <path d="M10 0H0v10h10V0z"/>
-                  <path d="M21 0H11v10h10V0z" opacity="0.8"/>
-                  <path d="M10 11H0v10h10V11z" opacity="0.6"/>
-                  <path d="M21 11H11v10h10V11z" opacity="0.4"/>
-                </svg>
-                Sign in with Microsoft
-              </span>
-            )}
-          </button>
+
+        {/* Security Badge */}
+        <div style={{
+          marginTop: '24px',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: '8px',
+          color: '#9CA3AF',
+          fontSize: '12px'
+        }}>
+          <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor">
+            <path fillRule="evenodd" d="M5 9V7a5 5 0 0110 0v2a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2zm8-2v2H7V7a3 3 0 016 0z" clipRule="evenodd" />
+          </svg>
+          Secured with Azure AD
         </div>
       </div>
     </div>
-  )
+  );
 }
 
 export default function LoginPage() {
   return (
-    <Suspense 
-      fallback={
-        <div className="min-h-screen flex items-center justify-center bg-gray-50">
-          <div className="text-center">
-            <div className="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-gray-900"></div>
-            <p className="mt-2 text-gray-600">Loading...</p>
-          </div>
-        </div>
-      }
-    >
-      <LoginForm />
+    <Suspense fallback={
+      <div style={{
+        minHeight: '100vh',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)'
+      }}>
+        <div>Loading...</div>
+      </div>
+    }>
+      <LoginContent />
     </Suspense>
-  )
+  );
 }
