@@ -1,41 +1,28 @@
-// app/api/subscriptions/route.ts
 import { sql } from '@vercel/postgres';
 import { NextResponse } from 'next/server';
 
 export async function GET() {
   try {
-    const { rows: subscriptions } = await sql<{
-      id: number;
-      company: string;
-      service: string;
-      cost: string; // numeric comes back as string
-      billing: 'monthly' | 'yearly' | 'quarterly';
-      next_billing: string | null;
-      contract_end: string | null;
-      category: string | null;
-      manager: string | null;
-      renewal_alert: number;
-      status: 'active' | 'pending' | 'cancelled';
-      payment_method: string | null;
-      notes: string | null;
-      last_payment_status: 'paid' | 'pending' | 'overdue';
-      created_at: string;
-      updated_at: string;
-      tags: string[] | null;
-      attachment_count: string; // count returns as string
-      payments: {
-        id: number;
-        date: string;
-        amount: string;
-        status: 'paid' | 'pending' | 'overdue';
-        method: string | null;
-        reference: string | null;
-      }[] | null;
-    }>`
+    const { rows } = await sql<any>`
       SELECT 
-        s.*,
-        ARRAY_AGG(DISTINCT t.tag) FILTER (WHERE t.tag IS NOT NULL) AS tags,
-        COUNT(DISTINCT a.id) AS attachment_count,
+        s.id,
+        s.company,
+        s.service,
+        s.cost,
+        s.billing,
+        s.next_billing      AS "nextBilling",
+        s.contract_end      AS "contractEnd",
+        s.category,
+        s.manager,
+        s.renewal_alert     AS "renewalAlert",
+        s.status,
+        s.payment_method    AS "paymentMethod",
+        s.notes,
+        s.last_payment_status AS "lastPaymentStatus",
+        s.created_at        AS "createdAt",
+        s.updated_at        AS "updatedAt",
+        ARRAY_AGG(DISTINCT t.tag) FILTER (WHERE t.tag IS NOT NULL) AS "tags",
+        COUNT(DISTINCT a.id) AS "attachmentCount",
         JSON_AGG(DISTINCT JSONB_BUILD_OBJECT(
           'id', p.id,
           'date', p.payment_date,
@@ -43,7 +30,7 @@ export async function GET() {
           'status', p.status,
           'method', p.method,
           'reference', p.reference
-        )) FILTER (WHERE p.id IS NOT NULL) AS payments
+        )) FILTER (WHERE p.id IS NOT NULL) AS "payments"
       FROM subscriptions s
       LEFT JOIN subscription_tags t ON s.id = t.subscription_id
       LEFT JOIN attachments a ON s.id = a.subscription_id
@@ -52,20 +39,24 @@ export async function GET() {
       ORDER BY s.created_at DESC
     `;
 
-    // Normalize numeric strings to numbers where it helps the client
-    const normalized = subscriptions.map((s) => ({
+    const normalized = (rows || []).map((s: any) => ({
       ...s,
-      cost: Number(s.cost),
-      attachment_count: Number(s.attachment_count),
+      cost: typeof s.cost === 'string' ? Number(s.cost) : s.cost,
+      attachmentCount:
+        typeof s.attachmentCount === 'string' ? Number(s.attachmentCount) : (s.attachmentCount ?? 0),
+      payments: Array.isArray(s.payments)
+        ? s.payments.map((p: any) => ({
+            ...p,
+            amount: typeof p?.amount === 'string' ? Number(p.amount) : p?.amount,
+            date: p?.date, // already aliased as 'date' in JSONB_BUILD_OBJECT
+          }))
+        : [],
     }));
 
     return NextResponse.json(normalized);
   } catch (error) {
     console.error('Error fetching subscriptions:', error);
-    return NextResponse.json(
-      { error: 'Failed to fetch subscriptions' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Failed to fetch subscriptions' }, { status: 500 });
   }
 }
 
@@ -104,7 +95,6 @@ export async function POST(request: Request) {
       lastPaymentStatus?: 'paid' | 'pending' | 'overdue';
     };
 
-    // Insert subscription
     const { rows } = await sql<{ id: number }>`
       INSERT INTO subscriptions (
         company, service, cost, billing, next_billing, contract_end,
@@ -123,7 +113,6 @@ export async function POST(request: Request) {
 
     const subscriptionId = rows[0].id;
 
-    // Insert tags (best-effort; if this fails the subscription still exists)
     if (Array.isArray(tags) && tags.length > 0) {
       for (const tag of tags) {
         await sql`
@@ -136,9 +125,6 @@ export async function POST(request: Request) {
     return NextResponse.json({ id: subscriptionId, ...body });
   } catch (error) {
     console.error('Error creating subscription:', error);
-    return NextResponse.json(
-      { error: 'Failed to create subscription' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Failed to create subscription' }, { status: 500 });
   }
 }

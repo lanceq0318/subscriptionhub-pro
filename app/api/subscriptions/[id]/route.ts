@@ -1,4 +1,3 @@
-// app/api/subscriptions/[id]/route.ts
 import { sql } from '@vercel/postgres';
 import { NextResponse } from 'next/server';
 
@@ -45,7 +44,6 @@ export async function PUT(
       lastPaymentStatus?: 'paid' | 'pending' | 'overdue';
     };
 
-    // Update subscription row
     await sql`
       UPDATE subscriptions
       SET
@@ -66,7 +64,6 @@ export async function PUT(
       WHERE id = ${id}
     `;
 
-    // Replace tags
     await sql`DELETE FROM subscription_tags WHERE subscription_id = ${id}`;
     if (Array.isArray(tags) && tags.length > 0) {
       for (const tag of tags) {
@@ -80,10 +77,7 @@ export async function PUT(
     return NextResponse.json({ success: true });
   } catch (error) {
     console.error('Error updating subscription:', error);
-    return NextResponse.json(
-      { error: 'Failed to update subscription' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Failed to update subscription' }, { status: 500 });
   }
 }
 
@@ -97,15 +91,15 @@ export async function DELETE(
       return NextResponse.json({ error: 'Invalid id' }, { status: 400 });
     }
 
-    // ON DELETE CASCADE on FKs will clean up related rows
+    // Safe manual cascade
+    await sql`DELETE FROM payments WHERE subscription_id = ${id}`;
+    await sql`DELETE FROM attachments WHERE subscription_id = ${id}`;
+    await sql`DELETE FROM subscription_tags WHERE subscription_id = ${id}`;
     await sql`DELETE FROM subscriptions WHERE id = ${id}`;
 
     return NextResponse.json({ success: true });
   } catch (error) {
     console.error('Error deleting subscription:', error);
-    return NextResponse.json(
-      { error: 'Failed to delete subscription' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Failed to delete subscription' }, { status: 500 });
   }
 }
