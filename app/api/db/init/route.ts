@@ -1,71 +1,86 @@
+// app/api/db/init/route.ts
 import { sql } from '@vercel/postgres';
 import { NextResponse } from 'next/server';
 
 export async function GET() {
   try {
+    // Core tables
     await sql`
       CREATE TABLE IF NOT EXISTS subscriptions (
         id SERIAL PRIMARY KEY,
-        company VARCHAR(50) NOT NULL,
-        service VARCHAR(255) NOT NULL,
-        cost DECIMAL(10, 2) NOT NULL,
-        billing VARCHAR(20) NOT NULL,
+        company TEXT NOT NULL,
+        service TEXT NOT NULL,
+        cost NUMERIC(12,2) NOT NULL DEFAULT 0,
+        billing TEXT NOT NULL CHECK (billing IN ('monthly','yearly','quarterly')),
         next_billing DATE,
         contract_end DATE,
-        category VARCHAR(50),
-        manager VARCHAR(100),
-        renewal_alert INTEGER DEFAULT 30,
-        status VARCHAR(20) DEFAULT 'active',
-        payment_method VARCHAR(50),
+        category TEXT,
+        manager TEXT,
+        renewal_alert INTEGER NOT NULL DEFAULT 30,
+        status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','pending','cancelled')),
+        payment_method TEXT,
         notes TEXT,
-        last_payment_status VARCHAR(20) DEFAULT 'pending',
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        last_payment_status TEXT NOT NULL DEFAULT 'pending' CHECK (last_payment_status IN ('paid','pending','overdue')),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
     `;
+
+    // Make sure legacy column is gone (frontend & routes no longer use it)
+    await sql`ALTER TABLE subscriptions DROP COLUMN IF EXISTS usage;`;
 
     await sql`
       CREATE TABLE IF NOT EXISTS subscription_tags (
         id SERIAL PRIMARY KEY,
-        subscription_id INTEGER REFERENCES subscriptions(id) ON DELETE CASCADE,
-        tag VARCHAR(50) NOT NULL
+        subscription_id INTEGER NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
+        tag TEXT NOT NULL
       );
     `;
 
     await sql`
       CREATE TABLE IF NOT EXISTS attachments (
         id SERIAL PRIMARY KEY,
-        subscription_id INTEGER REFERENCES subscriptions(id) ON DELETE CASCADE,
-        name VARCHAR(255) NOT NULL,
-        type VARCHAR(50),
+        subscription_id INTEGER NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
+        name TEXT NOT NULL,
+        type TEXT NOT NULL CHECK (type IN ('contract','invoice','other')),
         size INTEGER,
-        mime_type VARCHAR(100),
-        data TEXT,
-        upload_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        upload_date TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        mime_type TEXT,
+        data BYTEA
       );
     `;
 
     await sql`
       CREATE TABLE IF NOT EXISTS payments (
         id SERIAL PRIMARY KEY,
-        subscription_id INTEGER REFERENCES subscriptions(id) ON DELETE CASCADE,
-        amount DECIMAL(10, 2) NOT NULL,
+        subscription_id INTEGER NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
         payment_date DATE NOT NULL,
-        status VARCHAR(20) NOT NULL,
-        method VARCHAR(50),
-        reference VARCHAR(100)
+        amount NUMERIC(12,2) NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('paid','pending','overdue')),
+        method TEXT,
+        reference TEXT
       );
     `;
 
-    -- helpful indexes
+    // Helpful indexes
     await sql`CREATE INDEX IF NOT EXISTS idx_subscriptions_next_billing ON subscriptions(next_billing);`;
     await sql`CREATE INDEX IF NOT EXISTS idx_subscriptions_status ON subscriptions(status);`;
     await sql`CREATE INDEX IF NOT EXISTS idx_subscriptions_last_payment_status ON subscriptions(last_payment_status);`;
-    await sql`CREATE INDEX IF NOT EXISTS idx_subscriptions_company ON subscriptions(company);`;
+    await sql`CREATE INDEX IF NOT EXISTS idx_subscriptions_created_at ON subscriptions(created_at);`;
 
-    return NextResponse.json({ message: 'Database initialized successfully' });
-  } catch (error) {
-    console.error('Database initialization error:', error);
-    return NextResponse.json({ error: 'Failed to initialize database' }, { status: 500 });
+    await sql`CREATE INDEX IF NOT EXISTS idx_subscription_tags_subscription_id ON subscription_tags(subscription_id);`;
+
+    await sql`CREATE INDEX IF NOT EXISTS idx_attachments_subscription_id ON attachments(subscription_id);`;
+
+    await sql`CREATE INDEX IF NOT EXISTS idx_payments_subscription_id ON payments(subscription_id);`;
+    await sql`CREATE INDEX IF NOT EXISTS idx_payments_date ON payments(payment_date);`;
+
+    return NextResponse.json({ ok: true, message: 'Database initialized/updated' });
+  } catch (err) {
+    console.error('Error initializing database:', err);
+    return NextResponse.json(
+      { error: 'Failed to initialize database' },
+      { status: 500 }
+    );
   }
 }
