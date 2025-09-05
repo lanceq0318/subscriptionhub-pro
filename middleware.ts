@@ -8,27 +8,21 @@ export default withAuth(
   {
     pages: {
       signIn: "/login",
+      error: "/login",
     },
     callbacks: {
-      authorized: ({ req, token }) => {
-        // Protect all routes except public ones
-        const publicPaths = ['/login', '/api/auth', '/', '/favicon.ico'];
-        const path = req.nextUrl.pathname;
-        
-        // Allow public paths
-        if (publicPaths.some(p => path.startsWith(p))) {
-          return true;
-        }
-        
-        // Require authentication for everything else
+      authorized: ({ token }) => {
+        // Require authentication for protected routes
         return !!token;
-      }
-    }
+      },
+    },
   }
 );
 
+// Protect dashboard and API routes
 export const config = {
   matcher: [
-    '/((?!_next/static|_next/image|favicon.ico).*)',
-  ]
+    "/dashboard/:path*",
+    "/api/((?!auth|db/init).*)",
+  ],
 };

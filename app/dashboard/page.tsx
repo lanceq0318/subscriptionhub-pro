@@ -1,5 +1,7 @@
 'use client';
 
+import { useSession } from 'next-auth/react';
+import { signOut } from 'next-auth/react';
 import { api } from '@/app/lib/api';
 import {
   useEffect,
@@ -81,6 +83,7 @@ type Company = (typeof COMPANIES)[number];
 
 export default function Dashboard() {
   const router = useRouter();
+  const { data: session, status } = useSession();
   const [subscriptions, setSubscriptions] = useState<Subscription[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [showModal, setShowModal] = useState(false);
@@ -116,23 +119,68 @@ export default function Dashboard() {
     lastPaymentStatus: 'pending',
   });
 
-  // Load subscriptions from database
+  // Check authentication
+  useEffect(() => {
+    if (status === 'unauthenticated') {
+      router.push('/login');
+    }
+  }, [status, router]);
+
+  // Load subscriptions from database - only when authenticated
   useEffect(() => {
     async function loadSubscriptions() {
+      if (status !== 'authenticated') return;
+      
       setIsLoading(true);
       try {
         const data = await api.getSubscriptions();
         setSubscriptions(data);
       } catch (error) {
         console.error('Error loading subscriptions:', error);
-        // Optional: Set demo data as fallback
         setSubscriptions([]);
       } finally {
         setIsLoading(false);
       }
     }
     loadSubscriptions();
-  }, []);
+  }, [status]);
+
+  // Show loading while checking authentication
+  if (status === 'loading') {
+    return (
+      <div style={{
+        minHeight: '100vh',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        background: '#F9FAFB'
+      }}>
+        <div style={{ textAlign: 'center' }}>
+          <div style={{
+            width: '40px',
+            height: '40px',
+            border: '3px solid #E5E7EB',
+            borderTop: '3px solid #4F46E5',
+            borderRadius: '50%',
+            animation: 'spin 1s linear infinite',
+            margin: '0 auto 16px'
+          }} />
+          <style jsx>{`
+            @keyframes spin {
+              0% { transform: rotate(0deg); }
+              100% { transform: rotate(360deg); }
+            }
+          `}</style>
+          <p style={{ color: '#6B7280' }}>Authenticating...</p>
+        </div>
+      </div>
+    );
+  }
+
+  // Don't render if not authenticated
+  if (!session) {
+    return null;
+  }
 
   // Stats
   const stats = useMemo(() => {
@@ -474,6 +522,12 @@ export default function Dashboard() {
           </div>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+            {/* Display user email */}
+            {session.user?.email && (
+              <span style={{ fontSize: '14px', color: '#6B7280' }}>
+                {session.user.email}
+              </span>
+            )}
             <button
               onClick={handleExport}
               style={{
@@ -525,7 +579,7 @@ export default function Dashboard() {
             </button>
             <div style={{ width: '1px', height: '24px', background: '#E5E7EB' }} />
             <button
-              onClick={() => router.replace('/login')}
+              onClick={() => signOut({ callbackUrl: '/login' })}
               style={{
                 padding: '8px 16px',
                 background: 'transparent',
@@ -652,7 +706,7 @@ export default function Dashboard() {
               </div>
             )}
 
-            {/* Metrics Cards - Rest of the components remain the same */}
+            {/* Metrics Cards */}
             <div style={{
               display: 'grid',
               gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
@@ -939,7 +993,7 @@ export default function Dashboard() {
           </>
         )}
 
-        {/* Modals - All modal components remain the same */}
+        {/* Modals */}
         {showModal && <FormModal
           editingId={editingId}
           formData={formData}
@@ -974,7 +1028,7 @@ export default function Dashboard() {
           formatFileSize={formatFileSize}
         />}
 
-        {/* Help Modal remains the same */}
+        {/* Help Modal */}
         {showHelpModal && (
           <div
             style={{
@@ -1029,8 +1083,6 @@ export default function Dashboard() {
               </div>
 
               <div style={{ padding: '24px' }}>
-                {/* Help content remains the same */}
-                {/* Overview Section */}
                 <div style={{
                   background: 'linear-gradient(135deg, #EDE9FE 0%, #DDD6FE 100%)',
                   borderRadius: '8px',
@@ -1045,8 +1097,6 @@ export default function Dashboard() {
                     The system automatically calculates averages, detects cost spikes, and maintains history.
                   </p>
                 </div>
-
-                {/* Rest of help content... */}
               </div>
             </div>
           </div>
@@ -1056,7 +1106,6 @@ export default function Dashboard() {
   );
 }
 
-// All component definitions remain the same below...
 // Component: Metric Card
 const MetricCard = ({ label, value, sublabel, trend, trendUp, alert, icon }: any) => (
   <div style={{
@@ -1172,7 +1221,6 @@ const EmptyState = ({ onAddClick }: any) => (
   </div>
 );
 
-// Rest of components remain exactly the same...
 // Component: Subscription Card
 const SubscriptionCard = ({ subscription: sub, onEdit, onDelete, onViewDocuments, onMarkPaid, onUpload, formatCurrency, formatDate, getCompanyColor }: any) => {
   const getStatusColor = (status: string) => {
