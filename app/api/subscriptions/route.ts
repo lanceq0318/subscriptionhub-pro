@@ -1,170 +1,121 @@
-// app/api/subscriptions/route.ts
-import { sql } from '@vercel/postgres';
 import { NextResponse } from 'next/server';
+import { sql } from '@vercel/postgres';
+
+export const runtime = 'nodejs';
+
+type Row = {
+  id: number;
+  company: string;
+  service: string;
+  cost: string;                // numeric as string
+  billing: string;
+  next_billing: string | Date | null;
+  contract_end: string | Date | null;
+  category: string | null;
+  manager: string | null;
+  renewal_alert: number | null;
+  status: string;
+  payment_method: string | null;
+  tags: unknown;
+  notes: string | null;
+  last_payment_status: string | null;
+  pricing_type: string | null;
+};
 
 export async function GET() {
   try {
-    const { rows } = await sql<any>`
-      SELECT 
-        s.id,
-        s.company,
-        s.service,
-        s.cost,
-        s.billing,
-        s.next_billing      AS "nextBilling",
-        s.contract_end      AS "contractEnd",
-        s.category,
-        s.manager,
-        s.renewal_alert     AS "renewalAlert",
-        s.status,
-        s.payment_method    AS "paymentMethod",
-        s.notes,
-        s.last_payment_status AS "lastPaymentStatus",
-        s.pricing_type      AS "pricingType",
-        s.created_at        AS "createdAt",
-        s.updated_at        AS "updatedAt",
-
-        -- tags and payments
-        ARRAY_AGG(DISTINCT t.tag) FILTER (WHERE t.tag IS NOT NULL) AS "tags",
-
-        JSON_AGG(DISTINCT JSONB_BUILD_OBJECT(
-          'id', p.id,
-          'date', p.payment_date,
-          'amount', p.amount,
-          'status', p.status,
-          'method', p.method,
-          'reference', p.reference
-        )) FILTER (WHERE p.id IS NOT NULL) AS "payments",
-
-        -- current and last month actuals
-        (
-          SELECT sc.amount
-          FROM subscription_costs sc
-          WHERE sc.subscription_id = s.id
-            AND sc.period = DATE_TRUNC('month', CURRENT_DATE)::date
-          LIMIT 1
-        ) AS "currentMonthCost",
-
-        (
-          SELECT sc.amount
-          FROM subscription_costs sc
-          WHERE sc.subscription_id = s.id
-            AND sc.period = (DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '1 month')::date
-          LIMIT 1
-        ) AS "lastMonthCost",
-
-        -- last up-to-12 months history (period, amount)
-        (
-          SELECT JSON_AGG(JSON_BUILD_OBJECT('period', hh.period, 'amount', hh.amount) ORDER BY hh.period DESC)
-          FROM (
-            SELECT period, amount
-            FROM subscription_costs
-            WHERE subscription_id = s.id
-              AND period >= (DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '11 month')::date
-            ORDER BY period DESC
-          ) AS hh
-        ) AS "costHistory"
-
-      FROM subscriptions s
-      LEFT JOIN subscription_tags t ON s.id = t.subscription_id
-      LEFT JOIN payments p         ON s.id = p.subscription_id
-      GROUP BY s.id
-      ORDER BY s.created_at DESC
+    // Ensure columns/tables we rely on exist (idempotent)
+    await sql`ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS pricing_type text;`;
+    await sql`
+      CREATE TABLE IF NOT EXISTS subscription_costs (
+        id bigserial PRIMARY KEY,
+        subscription_id integer NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
+        period date NOT NULL,
+        amount numeric(12,2) NOT NULL,
+        source text,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        updated_at timestamptz NOT NULL DEFAULT now(),
+        UNIQUE (subscription_id, period)
+      );
     `;
 
-    const normalized = (rows || []).map((s: any) => ({
-      ...s,
-      cost: typeof s.cost === 'string' ? Number(s.cost) : s.cost,
-      currentMonthCost: typeof s.currentMonthCost === 'string' ? Number(s.currentMonthCost) : s.currentMonthCost,
-      lastMonthCost: typeof s.lastMonthCost === 'string' ? Number(s.lastMonthCost) : s.lastMonthCost,
-      payments: Array.isArray(s.payments)
-        ? s.payments.map((p: any) => ({
-            ...p,
-            amount: typeof p?.amount === 'string' ? Number(p.amount) : p?.amount,
-          }))
-        : [],
-      costHistory: Array.isArray(s.costHistory)
-        ? s.costHistory.map((h: any) => ({
-            period: h.period,
-            amount: typeof h.amount === 'string' ? Number(h.amount) : h.amount,
-          }))
-        : [],
-    }));
-
-    return NextResponse.json(normalized);
-  } catch (error) {
-    console.error('Error fetching subscriptions:', error);
-    return NextResponse.json({ error: 'Failed to fetch subscriptions' }, { status: 500 });
-  }
-}
-
-export async function POST(request: Request) {
-  try {
-    const body = await request.json();
-    const {
-      company,
-      service,
-      cost,
-      billing,
-      nextBilling,
-      contractEnd,
-      category,
-      manager,
-      renewalAlert,
-      status,
-      paymentMethod,
-      notes,
-      tags,
-      lastPaymentStatus,
-      pricingType, // 'fixed' | 'variable' (defaults server-side)
-    } = body as {
-      company: string;
-      service: string;
-      cost: number;
-      billing: 'monthly' | 'yearly' | 'quarterly';
-      nextBilling?: string | null;
-      contractEnd?: string | null;
-      category?: string | null;
-      manager?: string | null;
-      renewalAlert?: number;
-      status?: 'active' | 'pending' | 'cancelled';
-      paymentMethod?: string | null;
-      notes?: string | null;
-      tags?: string[];
-      lastPaymentStatus?: 'paid' | 'pending' | 'overdue';
-      pricingType?: 'fixed' | 'variable';
-    };
-
-    const { rows } = await sql<{ id: number }>`
-      INSERT INTO subscriptions (
-        company, service, cost, billing, next_billing, contract_end,
-        category, manager, renewal_alert, status, payment_method,
-        notes, last_payment_status, pricing_type
-      ) VALUES (
-        ${company}, ${service}, ${cost}, ${billing},
-        ${nextBilling || null}, ${contractEnd || null},
-        ${category || null}, ${manager || null},
-        ${renewalAlert ?? 30}, ${status || 'active'},
-        ${paymentMethod || null}, ${notes || null},
-        ${lastPaymentStatus || 'pending'}, ${pricingType || 'fixed'}
-      )
-      RETURNING id
+    // Base subs
+    const subsRes = await sql<Row>`
+      SELECT id, company, service, cost, billing, next_billing, contract_end, category,
+             manager, renewal_alert, status, payment_method, tags, notes,
+             last_payment_status, pricing_type
+      FROM subscriptions
+      ORDER BY id DESC;
     `;
 
-    const subscriptionId = rows[0].id;
+    // Load costs for last 13 months (so we can compute "current" + "last")
+    const now = new Date();
+    const start = new Date(now.getFullYear(), now.getMonth() - 12, 1).toISOString().slice(0, 10);
 
-    if (Array.isArray(tags) && tags.length > 0) {
-      for (const tag of tags) {
-        await sql`
-          INSERT INTO subscription_tags (subscription_id, tag)
-          VALUES (${subscriptionId}, ${tag})
-        `;
-      }
+    const costsRes = await sql<{ subscription_id: number; period: string; amount: string }>`
+      SELECT subscription_id, period::text, amount::text
+      FROM subscription_costs
+      WHERE period >= ${start}
+      ORDER BY subscription_id, period ASC;
+    `;
+
+    const bySub = new Map<number, Array<{ period: string; amount: number }>>();
+    for (const r of costsRes.rows) {
+      const arr = bySub.get(r.subscription_id) ?? [];
+      arr.push({ period: r.period, amount: Number(r.amount) });
+      bySub.set(r.subscription_id, arr);
     }
 
-    return NextResponse.json({ id: subscriptionId, ...body });
-  } catch (error) {
-    console.error('Error creating subscription:', error);
-    return NextResponse.json({ error: 'Failed to create subscription' }, { status: 500 });
+    const firstOfThisMonth = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0, 10);
+    const firstOfLastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1).toISOString().slice(0, 10);
+
+    const data = subsRes.rows.map((r) => {
+      const hist = bySub.get(r.id) ?? [];
+      const current = hist.find(h => h.period === firstOfThisMonth)?.amount ?? null;
+      const last = hist.find(h => h.period === firstOfLastMonth)?.amount ?? null;
+
+      // Normalize tags coming from jsonb or text[] or stringified JSON
+      const tags = (() => {
+        if (Array.isArray(r.tags)) return r.tags as string[];
+        if (typeof r.tags === 'string') {
+          try { return JSON.parse(r.tags) as string[]; } catch { return []; }
+        }
+        return [];
+      })();
+
+      return {
+        id: r.id,
+        company: r.company as 'Kisamos' | 'Mizzen' | 'Fertmax' | 'Shantaram' | 'Relia Ship',
+        service: r.service,
+        cost: Number(r.cost),
+        billing: (r.billing as 'monthly' | 'yearly' | 'quarterly') ?? 'monthly',
+        nextBilling: r.next_billing,
+        contractEnd: r.contract_end,
+        category: r.category ?? 'Software',
+        manager: r.manager ?? '',
+        renewalAlert: r.renewal_alert ?? 30,
+        status: (r.status as 'active' | 'pending' | 'cancelled') ?? 'active',
+        paymentMethod: r.payment_method ?? 'Credit Card',
+        tags,
+        notes: r.notes ?? '',
+        lastPaymentStatus: (r.last_payment_status as 'paid' | 'pending' | 'overdue') ?? 'pending',
+        pricingType: (r.pricing_type as 'fixed' | 'variable') ?? 'fixed',
+
+        // >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+        // NEW fields the UI reads to show variable-month figures:
+        currentMonthCost: current,
+        lastMonthCost: last,
+        costHistory: hist,          // [{ period: 'YYYY-MM-01', amount: number }]
+        // <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+
+        // still optional in UI; safe default:
+        attachment_count: 0
+      };
+    });
+
+    return NextResponse.json(data);
+  } catch (err: any) {
+    console.error('GET /api/subscriptions error', err);
+    return NextResponse.json({ error: err?.message ?? 'Unexpected error' }, { status: 500 });
   }
 }

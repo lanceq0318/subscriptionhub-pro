@@ -7,10 +7,13 @@ import {
   useEffect,
   useMemo,
   useState,
+  useCallback,
   type FormEventHandler,
   type ChangeEvent,
 } from 'react';
 
+ import { api } from '@/app/lib/api';
+import type { Subscription, Payment } from '@/types/subscription';
 /* =========================
    Types
    ========================= */
@@ -21,7 +24,7 @@ type FileAttachment = {
   type: 'contract' | 'invoice' | 'other';
   size: number;
   uploadDate: string;
-  data: string;        // data URL (base64)
+  data: string;
   mimeType: string;
 };
 
@@ -55,21 +58,43 @@ type Subscription = {
   attachments?: FileAttachment[];
   payments?: Payment[];
   lastPaymentStatus?: 'paid' | 'pending' | 'overdue';
-
-  /** variable-cost related (returned by GET aggregator) */
   pricingType?: 'fixed' | 'variable';
   currentMonthCost?: number | null;
   lastMonthCost?: number | null;
   costHistory?: CostPoint[];
-
-  /** returned by GET aggregator */
   attachment_count?: number;
+  healthScore?: number;
+  usagePercentage?: number;
+  lastUsed?: string;
+  seats?: number;
+  seatsUsed?: number;
 };
 
 type SubscriptionForm = Omit<
   Subscription,
-  'id' | 'cost' | 'attachment_count' | 'currentMonthCost' | 'lastMonthCost' | 'costHistory'
+  'id' | 'cost' | 'attachment_count' | 'currentMonthCost' | 'lastMonthCost' | 'costHistory' | 'healthScore'
 > & { cost: string };
+
+type Budget = {
+  id: string;
+  company: string;
+  category: string;
+  monthlyLimit: number;
+  yearlyLimit: number;
+  alertThreshold: number;
+};
+
+type SavedFilter = {
+  id: string;
+  name: string;
+  filters: {
+    company: string;
+    category: string;
+    status: string;
+    payment: string;
+    search: string;
+  };
+};
 
 /* =========================
    Constants
@@ -107,28 +132,37 @@ type Company = (typeof COMPANIES)[number];
    ========================= */
 
 export default function Dashboard() {
-  // ----- All hooks at top (prevents React error #310) -----
   const router = useRouter();
   const { data: session, status } = useSession();
 
   // Data & UI state
   const [subscriptions, setSubscriptions] = useState<Subscription[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [budgets, setBudgets] = useState<Budget[]>([]);
+  const [savedFilters, setSavedFilters] = useState<SavedFilter[]>([]);
 
   const [showModal, setShowModal] = useState(false);
   const [showDocumentsModal, setShowDocumentsModal] = useState(false);
   const [showHelpModal, setShowHelpModal] = useState(false);
+  const [showBudgetModal, setShowBudgetModal] = useState(false);
+  const [showImportModal, setShowImportModal] = useState(false);
+  const [showDuplicatesModal, setShowDuplicatesModal] = useState(false);
   const [selectedSubscription, setSelectedSubscription] = useState<Subscription | null>(null);
   const [editingId, setEditingId] = useState<number | null>(null);
 
   const [searchTerm, setSearchTerm] = useState('');
   const [companyFilter, setCompanyFilter] = useState<'all' | Company>('all');
   const [categoryFilter, setCategoryFilter] = useState('all');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'pending' | 'cancelled'>('all');
   const [paymentFilter, setPaymentFilter] = useState<'all' | 'paid' | 'pending' | 'overdue'>('all');
+  const [healthFilter, setHealthFilter] = useState<'all' | 'good' | 'warning' | 'critical'>('all');
   const [viewMode, setViewMode] = useState<'grid' | 'table' | 'analytics'>('grid');
+  const [dateRange, setDateRange] = useState<'30d' | '90d' | '1y' | 'all'>('30d');
 
   const [currentTags, setCurrentTags] = useState<string[]>([]);
   const [tagInput, setTagInput] = useState('');
+  const [showBulkActions, setShowBulkActions] = useState(false);
 
   const [formData, setFormData] = useState<SubscriptionForm>({
     company: 'Kisamos',
@@ -147,10 +181,12 @@ export default function Dashboard() {
     attachments: [],
     payments: [],
     lastPaymentStatus: 'pending',
-    pricingType: 'fixed', // NEW
+    pricingType: 'fixed',
+    seats: 0,
+    seatsUsed: 0,
   });
 
-  // ----- Helpers for cost logic -----
+  // Helpers for cost logic
   const normalizeToMonthly = (cost: number, billing: Subscription['billing']) => {
     if (billing === 'yearly') return cost / 12;
     if (billing === 'quarterly') return cost / 3;
@@ -165,19 +201,149 @@ export default function Dashboard() {
   };
 
   const effectiveChargeForPayment = (sub: Subscription) => {
-    // What to record in a Payment row when you click "Mark Paid"
     if (sub.pricingType === 'variable' && typeof sub.currentMonthCost === 'number') {
       return sub.currentMonthCost;
     }
-    // For fixed plans use full period cost (not normalized)
     return sub.cost;
   };
 
-  // ----- Derived values -----
-  const stats = useMemo(() => {
-    const active = subscriptions.filter(s => s.status === 'active');
-    const monthly = active.reduce((total, sub) => total + effectiveMonthly(sub), 0);
+  // Calculate health score for each subscription
+  const calculateHealthScore = (sub: Subscription): number => {
+    let score = 100;
+    
+    // Payment status impact
+    if (sub.lastPaymentStatus === 'overdue') score -= 30;
+    else if (sub.lastPaymentStatus === 'pending') score -= 10;
+    
+    // Usage impact (if seats data available)
+    if (sub.seats && sub.seatsUsed) {
+      const usageRate = (sub.seatsUsed / sub.seats) * 100;
+      if (usageRate < 30) score -= 25; // Underutilized
+      else if (usageRate > 90) score -= 5; // Near capacity
+    }
+    
+    // Contract expiry impact
+    if (sub.contractEnd) {
+      const daysToExpiry = Math.ceil((new Date(sub.contractEnd).getTime() - Date.now()) / (1000 * 60 * 60 * 24));
+      if (daysToExpiry < 30 && daysToExpiry > 0) score -= 15;
+      else if (daysToExpiry <= 0) score -= 25;
+    }
+    
+    // Variable cost volatility
+    if (sub.pricingType === 'variable' && sub.costHistory && sub.costHistory.length > 2) {
+      const recentCosts = sub.costHistory.slice(-3).map(c => c.amount);
+      const avgCost = recentCosts.reduce((a, b) => a + b, 0) / recentCosts.length;
+      const variance = recentCosts.reduce((sum, cost) => sum + Math.pow(cost - avgCost, 2), 0) / recentCosts.length;
+      const stdDev = Math.sqrt(variance);
+      const cv = (stdDev / avgCost) * 100;
+      if (cv > 30) score -= 20; // High volatility
+    }
+    
+    return Math.max(0, Math.min(100, score));
+  };
 
+  // Enhanced subscription data with health scores
+  const enhancedSubscriptions = useMemo(() => {
+    return subscriptions.map(sub => ({
+      ...sub,
+      healthScore: calculateHealthScore(sub),
+      usagePercentage: sub.seats ? (sub.seatsUsed || 0) / sub.seats * 100 : null,
+    }));
+  }, [subscriptions]);
+
+  // Detect potential duplicates
+  const detectDuplicates = useCallback(() => {
+    const duplicates: Subscription[][] = [];
+    const checked = new Set<number>();
+    
+    enhancedSubscriptions.forEach((sub1, i) => {
+      if (checked.has(sub1.id)) return;
+      
+      const similar = enhancedSubscriptions.filter((sub2, j) => {
+        if (i >= j || checked.has(sub2.id)) return false;
+        
+        // Check for similar names
+        const nameSimilarity = sub1.service.toLowerCase().includes(sub2.service.toLowerCase()) ||
+                               sub2.service.toLowerCase().includes(sub1.service.toLowerCase());
+        
+        // Check for same category and company
+        const sameCategoryCompany = sub1.category === sub2.category && sub1.company === sub2.company;
+        
+        return nameSimilarity || sameCategoryCompany;
+      });
+      
+      if (similar.length > 0) {
+        const group = [sub1, ...similar];
+        duplicates.push(group);
+        group.forEach(s => checked.add(s.id));
+      }
+    });
+    
+    return duplicates;
+  }, [enhancedSubscriptions]);
+
+  // Forecast future costs
+  const forecastCosts = useCallback((months: number = 6) => {
+    const forecast = [];
+    const now = new Date();
+    
+    for (let i = 0; i < months; i++) {
+      const date = new Date(now);
+      date.setMonth(date.getMonth() + i);
+      const monthKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+      
+      let predictedCost = 0;
+      enhancedSubscriptions.forEach(sub => {
+        if (sub.status !== 'active') return;
+        
+        if (sub.pricingType === 'variable' && sub.costHistory && sub.costHistory.length > 0) {
+          // Use average of last 3 months for variable costs
+          const recentCosts = sub.costHistory.slice(-3).map(c => c.amount);
+          predictedCost += recentCosts.reduce((a, b) => a + b, 0) / recentCosts.length;
+        } else {
+          predictedCost += effectiveMonthly(sub);
+        }
+      });
+      
+      forecast.push({
+        month: monthKey,
+        predicted: predictedCost,
+        confidence: i < 3 ? 'high' : i < 6 ? 'medium' : 'low'
+      });
+    }
+    
+    return forecast;
+  }, [enhancedSubscriptions]);
+
+  // Stats with enhancements
+  const stats = useMemo(() => {
+    const active = enhancedSubscriptions.filter(s => s.status === 'active');
+    const monthly = active.reduce((total, sub) => total + effectiveMonthly(sub), 0);
+    
+    // Calculate trend
+    const lastMonth = new Date();
+    lastMonth.setMonth(lastMonth.getMonth() - 1);
+    const lastMonthTotal = active.reduce((total, sub) => {
+      if (sub.pricingType === 'variable' && sub.lastMonthCost !== null) {
+        return total + sub.lastMonthCost;
+      }
+      return total + effectiveMonthly(sub);
+    }, 0);
+    const trend = lastMonthTotal > 0 ? ((monthly - lastMonthTotal) / lastMonthTotal * 100).toFixed(1) : '0';
+    
+    // Budget status
+    const currentBudget = budgets.find(b => b.company === 'all' && b.category === 'all');
+    const budgetUsage = currentBudget ? (monthly / currentBudget.monthlyLimit * 100) : 0;
+    
+    // Health metrics
+    const avgHealthScore = active.length > 0 
+      ? active.reduce((sum, sub) => sum + (sub.healthScore || 0), 0) / active.length 
+      : 100;
+    
+    const underutilized = active.filter(sub => 
+      sub.seats && sub.seatsUsed && (sub.seatsUsed / sub.seats) < 0.3
+    ).length;
+    
     const vendors = new Set(subscriptions.map(s => s.service)).size;
     const paidCount = subscriptions.filter(s => s.lastPaymentStatus === 'paid').length;
     const pendingCount = subscriptions.filter(s => s.lastPaymentStatus === 'pending').length;
@@ -192,12 +358,16 @@ export default function Dashboard() {
       paidCount,
       pendingCount,
       overdueCount,
+      trend,
+      budgetUsage,
+      avgHealthScore,
+      underutilized,
     };
-  }, [subscriptions]);
+  }, [enhancedSubscriptions, budgets]);
 
   const upcomingRenewals = useMemo(() => {
     const today = new Date();
-    return subscriptions
+    return enhancedSubscriptions
       .filter((sub) => {
         if (!sub.nextBilling || sub.status !== 'active') return false;
         const renewalDate = new Date(sub.nextBilling);
@@ -205,10 +375,10 @@ export default function Dashboard() {
         return daysUntil <= sub.renewalAlert && daysUntil >= 0;
       })
       .sort((a, b) => (a.nextBilling || '').localeCompare(b.nextBilling || ''));
-  }, [subscriptions]);
+  }, [enhancedSubscriptions]);
 
   const filteredSubscriptions = useMemo(() => {
-    let filtered = subscriptions;
+    let filtered = enhancedSubscriptions;
 
     if (companyFilter !== 'all') {
       filtered = filtered.filter(sub => sub.company === companyFilter);
@@ -216,8 +386,20 @@ export default function Dashboard() {
     if (categoryFilter !== 'all') {
       filtered = filtered.filter(sub => sub.category === categoryFilter);
     }
+    if (statusFilter !== 'all') {
+      filtered = filtered.filter(sub => sub.status === statusFilter);
+    }
     if (paymentFilter !== 'all') {
       filtered = filtered.filter(sub => sub.lastPaymentStatus === paymentFilter);
+    }
+    if (healthFilter !== 'all') {
+      filtered = filtered.filter(sub => {
+        const score = sub.healthScore || 100;
+        if (healthFilter === 'good') return score >= 70;
+        if (healthFilter === 'warning') return score >= 40 && score < 70;
+        if (healthFilter === 'critical') return score < 40;
+        return true;
+      });
     }
     if (searchTerm) {
       const q = searchTerm.toLowerCase();
@@ -229,9 +411,9 @@ export default function Dashboard() {
       );
     }
     return filtered;
-  }, [subscriptions, companyFilter, categoryFilter, paymentFilter, searchTerm]);
+  }, [enhancedSubscriptions, companyFilter, categoryFilter, statusFilter, paymentFilter, healthFilter, searchTerm]);
 
-  // ----- Effects -----
+  // Effects
   useEffect(() => {
     if (status === 'unauthenticated') {
       router.push('/login');
@@ -245,6 +427,14 @@ export default function Dashboard() {
       try {
         const data = await api.getSubscriptions();
         setSubscriptions(data);
+        
+        // Load saved filters from localStorage
+        const saved = localStorage.getItem('savedFilters');
+        if (saved) setSavedFilters(JSON.parse(saved));
+        
+        // Load budgets from localStorage
+        const savedBudgets = localStorage.getItem('budgets');
+        if (savedBudgets) setBudgets(JSON.parse(savedBudgets));
       } catch (error) {
         console.error('Error loading subscriptions:', error);
         setSubscriptions([]);
@@ -255,7 +445,137 @@ export default function Dashboard() {
     loadSubscriptions();
   }, [status]);
 
-  // ----- Conditional returns AFTER hooks/useMemo -----
+  // Bulk operations
+  const handleBulkDelete = async () => {
+    if (selectedIds.size === 0) return;
+    
+    if (confirm(`Delete ${selectedIds.size} subscriptions? This action cannot be undone.`)) {
+      try {
+        await Promise.all(Array.from(selectedIds).map(id => api.deleteSubscription(id)));
+        const data = await api.getSubscriptions();
+        setSubscriptions(data);
+        setSelectedIds(new Set());
+        setShowBulkActions(false);
+      } catch (error) {
+        console.error('Error deleting subscriptions:', error);
+        alert('Failed to delete some subscriptions');
+      }
+    }
+  };
+
+  const handleBulkStatusChange = async (newStatus: 'active' | 'pending' | 'cancelled') => {
+    if (selectedIds.size === 0) return;
+    
+    try {
+      await Promise.all(
+        Array.from(selectedIds).map(id => {
+          const sub = subscriptions.find(s => s.id === id);
+          if (sub) {
+            return api.updateSubscription(id, { ...sub, status: newStatus });
+          }
+        })
+      );
+      const data = await api.getSubscriptions();
+      setSubscriptions(data);
+      setSelectedIds(new Set());
+      setShowBulkActions(false);
+    } catch (error) {
+      console.error('Error updating subscriptions:', error);
+      alert('Failed to update some subscriptions');
+    }
+  };
+
+  const toggleSelection = (id: number) => {
+    const newSelection = new Set(selectedIds);
+    if (newSelection.has(id)) {
+      newSelection.delete(id);
+    } else {
+      newSelection.add(id);
+    }
+    setSelectedIds(newSelection);
+    setShowBulkActions(newSelection.size > 0);
+  };
+
+  const selectAll = () => {
+    if (selectedIds.size === filteredSubscriptions.length) {
+      setSelectedIds(new Set());
+      setShowBulkActions(false);
+    } else {
+      setSelectedIds(new Set(filteredSubscriptions.map(s => s.id)));
+      setShowBulkActions(true);
+    }
+  };
+
+  // Import functionality
+  const handleImport = async (data: any[]) => {
+    try {
+      const imported = data.map(row => ({
+        company: row.company || 'Kisamos',
+        service: row.service || row.name || 'Unknown Service',
+        cost: parseFloat(row.cost || row.amount || 0),
+        billing: row.billing || 'monthly',
+        nextBilling: row.nextBilling || row.next_billing || '',
+        contractEnd: row.contractEnd || row.contract_end || '',
+        category: row.category || 'Software',
+        manager: row.manager || '',
+        renewalAlert: parseInt(row.renewalAlert || 30),
+        status: row.status || 'active',
+        paymentMethod: row.paymentMethod || row.payment_method || 'Credit Card',
+        tags: row.tags ? row.tags.split(',').map((t: string) => t.trim()) : [],
+        notes: row.notes || '',
+        pricingType: row.pricingType || row.pricing_type || 'fixed',
+      }));
+      
+      for (const sub of imported) {
+        await api.createSubscription(sub);
+      }
+      
+      const data = await api.getSubscriptions();
+      setSubscriptions(data);
+      setShowImportModal(false);
+      alert(`Successfully imported ${imported.length} subscriptions`);
+    } catch (error) {
+      console.error('Error importing subscriptions:', error);
+      alert('Failed to import subscriptions. Please check the format.');
+    }
+  };
+
+  // Save filter preset
+  const saveFilterPreset = () => {
+    const name = prompt('Enter a name for this filter preset:');
+    if (!name) return;
+    
+    const newFilter: SavedFilter = {
+      id: Date.now().toString(),
+      name,
+      filters: {
+        company: companyFilter,
+        category: categoryFilter,
+        status: statusFilter,
+        payment: paymentFilter,
+        search: searchTerm,
+      },
+    };
+    
+    const updated = [...savedFilters, newFilter];
+    setSavedFilters(updated);
+    localStorage.setItem('savedFilters', JSON.stringify(updated));
+  };
+
+  const loadFilterPreset = (filter: SavedFilter) => {
+    setCompanyFilter(filter.filters.company as any);
+    setCategoryFilter(filter.filters.category);
+    setStatusFilter(filter.filters.status as any);
+    setPaymentFilter(filter.filters.payment as any);
+    setSearchTerm(filter.filters.search);
+  };
+
+  const deleteFilterPreset = (id: string) => {
+    const updated = savedFilters.filter(f => f.id !== id);
+    setSavedFilters(updated);
+    localStorage.setItem('savedFilters', JSON.stringify(updated));
+  };
+
   if (status === 'loading') {
     return (
       <div style={fullHeightCenter('#F9FAFB')}>
@@ -269,7 +589,7 @@ export default function Dashboard() {
   if (!session) return null;
 
   /* =========================
-     Helpers
+     Helper Functions
      ========================= */
 
   const handleFileUpload = async (event: ChangeEvent<HTMLInputElement>, subscriptionId?: number) => {
@@ -277,7 +597,7 @@ export default function Dashboard() {
     if (!files || files.length === 0) return;
 
     const file = files[0];
-    const maxSize = 10 * 1024 * 1024; // 10MB
+    const maxSize = 10 * 1024 * 1024;
 
     if (file.size > maxSize) {
       alert('File size exceeds 10MB limit');
@@ -347,8 +667,6 @@ export default function Dashboard() {
       };
 
       await api.markAsPaid(subscriptionId, payment);
-
-      // Reload
       const data = await api.getSubscriptions();
       setSubscriptions(data);
     } catch (error) {
@@ -375,9 +693,7 @@ export default function Dashboard() {
         return;
       }
 
-      // Cast to any to avoid type errors if your api typings aren't updated yet
       await (api as any).upsertSubscriptionCost(subscriptionId, { period, amount, source: 'manual' });
-
       const data = await api.getSubscriptions();
       setSubscriptions(data);
     } catch (err) {
@@ -387,11 +703,18 @@ export default function Dashboard() {
   };
 
   const handleExport = () => {
-    const blob = new Blob([JSON.stringify(subscriptions, null, 2)], { type: 'application/json' });
+    const exportData = {
+      subscriptions: subscriptions,
+      budgets: budgets,
+      exportDate: new Date().toISOString(),
+      stats: stats,
+    };
+    
+    const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'subscriptions.json';
+    a.download = `subscriptions_${new Date().toISOString().split('T')[0]}.json`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -453,6 +776,8 @@ export default function Dashboard() {
       payments: [],
       lastPaymentStatus: 'pending',
       pricingType: 'fixed',
+      seats: 0,
+      seatsUsed: 0,
     });
     setCurrentTags([]);
     setTagInput('');
@@ -461,11 +786,13 @@ export default function Dashboard() {
   };
 
   const handleEdit = (sub: Subscription) => {
-    const { id: _id, cost: _ignore, attachment_count: _ac, ...rest } = sub;
+    const { id: _id, cost: _ignore, attachment_count: _ac, healthScore: _hs, ...rest } = sub;
     setFormData({
       ...rest,
       cost: sub.cost.toString(),
       pricingType: sub.pricingType || 'fixed',
+      seats: sub.seats || 0,
+      seatsUsed: sub.seatsUsed || 0,
     });
     setCurrentTags(sub.tags || []);
     setEditingId(sub.id);
@@ -582,19 +909,37 @@ export default function Dashboard() {
           </div>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+            {/* Quick Actions */}
+            <QuickActions
+              onQuickAdd={() => setShowModal(true)}
+              onDetectDuplicates={() => setShowDuplicatesModal(true)}
+              onManageBudgets={() => setShowBudgetModal(true)}
+            />
+            
             {session.user?.email && (
               <span style={{ fontSize: '14px', color: '#6B7280' }}>
                 {session.user.email}
               </span>
             )}
+            
+            <button
+              onClick={() => setShowImportModal(true)}
+              style={ghostBtn}
+              onMouseEnter={hoverFill}
+              onMouseLeave={hoverReset}
+            >
+              Import
+            </button>
+            
             <button
               onClick={handleExport}
               style={ghostBtn}
               onMouseEnter={hoverFill}
               onMouseLeave={hoverReset}
             >
-              Export Data
+              Export
             </button>
+            
             <button
               onClick={() => setShowHelpModal(true)}
               style={ghostBtn}
@@ -603,14 +948,9 @@ export default function Dashboard() {
             >
               Help
             </button>
-            <button
-              style={ghostBtn}
-              onMouseEnter={hoverFill}
-              onMouseLeave={hoverReset}
-            >
-              Settings
-            </button>
+            
             <div style={{ width: '1px', height: '24px', background: '#E5E7EB' }} />
+            
             <button
               onClick={() => signOut({ callbackUrl: '/login' })}
               style={outlineBtn}
@@ -650,81 +990,16 @@ export default function Dashboard() {
         ) : (
           <>
             {/* Alerts */}
-            {(upcomingRenewals.length > 0 || stats.overdueCount > 0) && (
-              <div style={{ marginBottom: '24px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
-                {upcomingRenewals.length > 0 && (
-                  <Alert
-                    tone="warning"
-                    title={`${upcomingRenewals.length} Upcoming Renewal${upcomingRenewals.length > 1 ? 's' : ''}`}
-                    iconColor="#F59E0B"
-                    bg="#FEF3C7"
-                    border="#FCD34D"
-                    textColor="#78350F"
-                  >
-                    {upcomingRenewals.map((sub, idx) => (
-                      <span key={sub.id}>
-                        {sub.service} ({formatDate(sub.nextBilling)})
-                        {idx < upcomingRenewals.length - 1 ? ' • ' : ''}
-                      </span>
-                    ))}
-                  </Alert>
-                )}
+            <AlertsSection
+              upcomingRenewals={upcomingRenewals}
+              overdueCount={stats.overdueCount}
+              underutilizedCount={stats.underutilized}
+              budgetUsage={stats.budgetUsage}
+              formatDate={formatDate}
+            />
 
-                {stats.overdueCount > 0 && (
-                  <Alert
-                    tone="danger"
-                    title={`${stats.overdueCount} Overdue Payment${stats.overdueCount > 1 ? 's' : ''}`}
-                    iconColor="#DC2626"
-                    bg="#FEE2E2"
-                    border="#FCA5A5"
-                    textColor="#7F1D1D"
-                  >
-                    Review and process overdue payments to avoid service disruptions
-                  </Alert>
-                )}
-              </div>
-            )}
-
-            {/* Metrics */}
-            <div style={{
-              display: 'grid',
-              gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
-              gap: '20px',
-              marginBottom: '32px'
-            }}>
-              <MetricCard
-                label="Monthly Spend"
-                value={formatCurrency(parseFloat(stats.monthly))}
-                trend="+12.5%"
-                trendUp
-                icon={<IconMoney />}
-              />
-              <MetricCard
-                label="Annual Projection"
-                value={formatCurrency(parseFloat(stats.yearly))}
-                trend="-3.2%"
-                icon={<IconCalendarMoney />}
-              />
-              <MetricCard
-                label="Active Subscriptions"
-                value={stats.active.toString()}
-                sublabel={`of ${stats.total} total`}
-                icon={<IconActive />}
-              />
-              <MetricCard
-                label="Vendors"
-                value={stats.vendors.toString()}
-                sublabel="unique providers"
-                icon={<IconVendors />}
-              />
-              <MetricCard
-                label="Payment Status"
-                value={`${stats.paidCount}/${stats.total}`}
-                sublabel="paid this period"
-                alert={stats.overdueCount > 0}
-                icon={<IconPayment />}
-              />
-            </div>
+            {/* Enhanced Metrics */}
+            <EnhancedMetrics stats={stats} formatCurrency={formatCurrency} />
 
             {/* Controls */}
             <div style={{
@@ -732,111 +1007,173 @@ export default function Dashboard() {
               border: '1px solid #E5E7EB',
               borderRadius: '8px',
               padding: '16px',
-              marginBottom: '24px',
-              display: 'flex',
-              gap: '12px',
-              flexWrap: 'wrap',
-              alignItems: 'center',
-              justifyContent: 'space-between'
+              marginBottom: '24px'
             }}>
-              <div style={{ display: 'flex', gap: '12px', flex: '1', flexWrap: 'wrap', minWidth: '0' }}>
-                {/* Search */}
-                <div style={{ position: 'relative', flex: '1', minWidth: '200px', maxWidth: '320px' }}>
-                  <IconSearch style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)' }} />
-                  <input
-                    type="text"
-                    placeholder="Search subscriptions..."
-                    value={searchTerm}
-                    onChange={e => setSearchTerm(e.target.value)}
-                    style={{
-                      width: '100%',
-                      padding: '8px 12px 8px 36px',
-                      border: '1px solid #E5E7EB',
-                      borderRadius: '6px',
-                      fontSize: '14px',
-                      outline: 'none',
-                      transition: 'border-color 0.2s'
-                    } as React.CSSProperties}
-                    onFocus={e => e.currentTarget.style.borderColor = '#4F46E5'}
-                    onBlur={e => e.currentTarget.style.borderColor = '#E5E7EB'}
-                  />
+              {/* Bulk Actions Bar */}
+              {showBulkActions && (
+                <BulkActionsBar
+                  selectedCount={selectedIds.size}
+                  onDelete={handleBulkDelete}
+                  onStatusChange={handleBulkStatusChange}
+                  onCancel={() => {
+                    setSelectedIds(new Set());
+                    setShowBulkActions(false);
+                  }}
+                />
+              )}
+
+              <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between' }}>
+                <div style={{ display: 'flex', gap: '12px', flex: '1', flexWrap: 'wrap', minWidth: '0' }}>
+                  {/* Search */}
+                  <div style={{ position: 'relative', flex: '1', minWidth: '200px', maxWidth: '320px' }}>
+                    <IconSearch style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)' }} />
+                    <input
+                      type="text"
+                      placeholder="Search subscriptions..."
+                      value={searchTerm}
+                      onChange={e => setSearchTerm(e.target.value)}
+                      style={{
+                        width: '100%',
+                        padding: '8px 12px 8px 36px',
+                        border: '1px solid #E5E7EB',
+                        borderRadius: '6px',
+                        fontSize: '14px',
+                        outline: 'none',
+                        transition: 'border-color 0.2s'
+                      } as React.CSSProperties}
+                      onFocus={e => e.currentTarget.style.borderColor = '#4F46E5'}
+                      onBlur={e => e.currentTarget.style.borderColor = '#E5E7EB'}
+                    />
+                  </div>
+
+                  {/* Enhanced Filters */}
+                  <select
+                    value={companyFilter}
+                    onChange={e => setCompanyFilter(e.target.value as 'all' | Company)}
+                    style={selectStyle}
+                  >
+                    <option value="all">All Companies</option>
+                    {COMPANIES.map(c => (
+                      <option key={c} value={c}>{c}</option>
+                    ))}
+                  </select>
+
+                  <select
+                    value={categoryFilter}
+                    onChange={e => setCategoryFilter(e.target.value)}
+                    style={selectStyle}
+                  >
+                    <option value="all">All Categories</option>
+                    {CATEGORIES.map(c => (
+                      <option key={c} value={c}>{c}</option>
+                    ))}
+                  </select>
+
+                  <select
+                    value={statusFilter}
+                    onChange={e => setStatusFilter(e.target.value as any)}
+                    style={selectStyle}
+                  >
+                    <option value="all">All Status</option>
+                    <option value="active">Active</option>
+                    <option value="pending">Pending</option>
+                    <option value="cancelled">Cancelled</option>
+                  </select>
+
+                  <select
+                    value={paymentFilter}
+                    onChange={e => setPaymentFilter(e.target.value as any)}
+                    style={selectStyle}
+                  >
+                    <option value="all">All Payments</option>
+                    <option value="paid">Paid</option>
+                    <option value="pending">Pending</option>
+                    <option value="overdue">Overdue</option>
+                  </select>
+
+                  <select
+                    value={healthFilter}
+                    onChange={e => setHealthFilter(e.target.value as any)}
+                    style={selectStyle}
+                  >
+                    <option value="all">All Health</option>
+                    <option value="good">Good (70+)</option>
+                    <option value="warning">Warning (40-69)</option>
+                    <option value="critical">Critical (&lt;40)</option>
+                  </select>
+
+                  {/* Saved Filters */}
+                  {savedFilters.length > 0 && (
+                    <SavedFiltersDropdown
+                      filters={savedFilters}
+                      onLoad={loadFilterPreset}
+                      onDelete={deleteFilterPreset}
+                    />
+                  )}
+                  
+                  <button
+                    onClick={saveFilterPreset}
+                    style={{ ...ghostBtn, padding: '8px 12px' }}
+                    title="Save current filter preset"
+                  >
+                    Save Filter
+                  </button>
                 </div>
 
-                {/* Filters */}
-                <select
-                  value={companyFilter}
-                  onChange={e => setCompanyFilter(e.target.value as 'all' | Company)}
-                  style={selectStyle}
-                >
-                  <option value="all">All Companies</option>
-                  {COMPANIES.map(c => (
-                    <option key={c} value={c}>{c}</option>
-                  ))}
-                </select>
+                <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+                  {/* Select All Checkbox */}
+                  {viewMode !== 'analytics' && (
+                    <label style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer' }}>
+                      <input
+                        type="checkbox"
+                        checked={selectedIds.size === filteredSubscriptions.length && filteredSubscriptions.length > 0}
+                        onChange={selectAll}
+                        style={{ cursor: 'pointer' }}
+                      />
+                      <span style={{ fontSize: '14px', color: '#6B7280' }}>Select All</span>
+                    </label>
+                  )}
 
-                <select
-                  value={categoryFilter}
-                  onChange={e => setCategoryFilter(e.target.value)}
-                  style={selectStyle}
-                >
-                  <option value="all">All Categories</option>
-                  {CATEGORIES.map(c => (
-                    <option key={c} value={c}>{c}</option>
-                  ))}
-                </select>
+                  {/* View Toggle */}
+                  <div style={{
+                    display: 'flex',
+                    border: '1px solid #E5E7EB',
+                    borderRadius: '6px',
+                    overflow: 'hidden'
+                  }}>
+                    <ViewToggleButton
+                      active={viewMode === 'grid'}
+                      onClick={() => setViewMode('grid')}
+                      first
+                    >
+                      <IconGrid />
+                    </ViewToggleButton>
+                    <ViewToggleButton
+                      active={viewMode === 'table'}
+                      onClick={() => setViewMode('table')}
+                    >
+                      <IconTable />
+                    </ViewToggleButton>
+                    <ViewToggleButton
+                      active={viewMode === 'analytics'}
+                      onClick={() => setViewMode('analytics')}
+                      last
+                    >
+                      <IconBars />
+                    </ViewToggleButton>
+                  </div>
 
-                <select
-                  value={paymentFilter}
-                  onChange={e => setPaymentFilter(e.target.value as any)}
-                  style={selectStyle}
-                >
-                  <option value="all">All Payments</option>
-                  <option value="paid">Paid</option>
-                  <option value="pending">Pending</option>
-                  <option value="overdue">Overdue</option>
-                </select>
-              </div>
-
-              <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
-                {/* View Toggle */}
-                <div style={{
-                  display: 'flex',
-                  border: '1px solid #E5E7EB',
-                  borderRadius: '6px',
-                  overflow: 'hidden'
-                }}>
-                  <ViewToggleButton
-                    active={viewMode === 'grid'}
-                    onClick={() => setViewMode('grid')}
-                    first
+                  {/* Add */}
+                  <button
+                    onClick={() => setShowModal(true)}
+                    style={primaryBtn}
+                    onMouseEnter={e => e.currentTarget.style.background = '#4338CA'}
+                    onMouseLeave={e => e.currentTarget.style.background = '#4F46E5'}
                   >
-                    <IconGrid />
-                  </ViewToggleButton>
-                  <ViewToggleButton
-                    active={viewMode === 'table'}
-                    onClick={() => setViewMode('table')}
-                  >
-                    <IconTable />
-                  </ViewToggleButton>
-                  <ViewToggleButton
-                    active={viewMode === 'analytics'}
-                    onClick={() => setViewMode('analytics')}
-                    last
-                  >
-                    <IconBars />
-                  </ViewToggleButton>
+                    <IconPlus />
+                    Add Subscription
+                  </button>
                 </div>
-
-                {/* Add */}
-                <button
-                  onClick={() => setShowModal(true)}
-                  style={primaryBtn}
-                  onMouseEnter={e => e.currentTarget.style.background = '#4338CA'}
-                  onMouseLeave={e => e.currentTarget.style.background = '#4F46E5'}
-                >
-                  <IconPlus />
-                  Add Subscription
-                </button>
               </div>
             </div>
 
@@ -850,9 +1187,11 @@ export default function Dashboard() {
                 gap: '20px'
               }}>
                 {filteredSubscriptions.map(sub => (
-                  <SubscriptionCard
+                  <EnhancedSubscriptionCard
                     key={sub.id}
                     subscription={sub}
+                    selected={selectedIds.has(sub.id)}
+                    onToggleSelect={() => toggleSelection(sub.id)}
                     onEdit={() => handleEdit(sub)}
                     onDelete={() => handleDelete(sub.id)}
                     onViewDocuments={() => {
@@ -865,15 +1204,14 @@ export default function Dashboard() {
                     formatCurrency={formatCurrency}
                     formatDate={formatDate}
                     getCompanyColor={getCompanyColor}
-                    displayAmount={sub.pricingType === 'variable' && typeof sub.currentMonthCost === 'number'
-                      ? sub.currentMonthCost
-                      : sub.cost}
                   />
                 ))}
               </div>
             ) : viewMode === 'table' ? (
-              <TableView
+              <EnhancedTableView
                 subscriptions={filteredSubscriptions}
+                selectedIds={selectedIds}
+                onToggleSelect={toggleSelection}
                 onEdit={handleEdit}
                 onDelete={handleDelete}
                 onMarkPaid={markAsPaid}
@@ -888,22 +1226,20 @@ export default function Dashboard() {
                 getCompanyColor={getCompanyColor}
               />
             ) : (
-              <div style={cardBox(48)}>
-                <IconBarsLarge />
-                <h3 style={{ fontSize: '18px', fontWeight: '600', color: '#111827', marginBottom: '8px' }}>
-                  Analytics Coming Soon
-                </h3>
-                <p style={{ color: '#6B7280', fontSize: '14px' }}>
-                  Advanced analytics and reporting features are under development
-                </p>
-              </div>
+              <AnalyticsView
+                subscriptions={enhancedSubscriptions}
+                formatCurrency={formatCurrency}
+                forecastData={forecastCosts()}
+                dateRange={dateRange}
+                onDateRangeChange={setDateRange}
+              />
             )}
           </>
         )}
 
         {/* Modals */}
         {showModal && (
-          <FormModal
+          <EnhancedFormModal
             editingId={editingId}
             formData={formData}
             setFormData={setFormData}
@@ -940,33 +1276,50 @@ export default function Dashboard() {
           />
         )}
 
-        {showHelpModal && (
-          <div
-            style={backdrop}
-            onClick={(e) => {
-              if (e.target === e.currentTarget) setShowHelpModal(false);
+        {showBudgetModal && (
+          <BudgetModal
+            budgets={budgets}
+            onClose={() => setShowBudgetModal(false)}
+            onSave={(newBudgets) => {
+              setBudgets(newBudgets);
+              localStorage.setItem('budgets', JSON.stringify(newBudgets));
+              setShowBudgetModal(false);
             }}
-          >
-            <div style={modalBox(800)}>
-              <ModalHeader title="How to Manage Variable Cost Subscriptions" onClose={() => setShowHelpModal(false)} />
-              <div style={{ padding: '24px' }}>
-                <div style={{
-                  background: 'linear-gradient(135deg, #EDE9FE 0%, #DDD6FE 100%)',
-                  borderRadius: '8px',
-                  padding: '16px',
-                  marginBottom: '24px'
-                }}>
-                  <h3 style={{ fontSize: '16px', fontWeight: '600', color: '#5B21B6', marginBottom: '8px' }}>
-                    🎯 Perfect for Microsoft 365, Azure, AWS & Variable Services
-                  </h3>
-                  <p style={{ fontSize: '14px', color: '#6D28D9', margin: 0 }}>
-                    Track subscriptions that change monthly due to seat count, tiers, or consumption.
-                    Store actuals by month, compute averages, and highlight cost spikes.
-                  </p>
-                </div>
-              </div>
-            </div>
-          </div>
+            COMPANIES={COMPANIES}
+            CATEGORIES={CATEGORIES}
+          />
+        )}
+
+        {showImportModal && (
+          <ImportModal
+            onClose={() => setShowImportModal(false)}
+            onImport={handleImport}
+          />
+        )}
+
+        {showDuplicatesModal && (
+          <DuplicatesModal
+            duplicates={detectDuplicates()}
+            onClose={() => setShowDuplicatesModal(false)}
+            onMerge={async (keepId: number, deleteIds: number[]) => {
+              try {
+                for (const id of deleteIds) {
+                  await api.deleteSubscription(id);
+                }
+                const data = await api.getSubscriptions();
+                setSubscriptions(data);
+                alert('Successfully merged subscriptions');
+              } catch (error) {
+                console.error('Error merging subscriptions:', error);
+                alert('Failed to merge subscriptions');
+              }
+            }}
+            formatCurrency={formatCurrency}
+          />
+        )}
+
+        {showHelpModal && (
+          <EnhancedHelpModal onClose={() => setShowHelpModal(false)} />
         )}
       </div>
     </div>
@@ -974,390 +1327,264 @@ export default function Dashboard() {
 }
 
 /* =========================
-   Small UI Helpers
+   New Components
    ========================= */
 
-const Spinner = () => (
-  <>
-    <div style={{
-      width: '40px',
-      height: '40px',
-      border: '3px solid #E5E7EB',
-      borderTop: '3px solid #4F46E5',
-      borderRadius: '50%',
-      animation: 'spin 1s linear infinite',
-      margin: '0 auto 16px'
-    }} />
-    {/* styled-jsx for spinner */}
-    <style jsx>{`
-      @keyframes spin {
-        0% { transform: rotate(0deg); }
-        100% { transform: rotate(360deg); }
-      }
-    `}</style>
-  </>
-);
-
-const Alert = ({
-  tone,
-  title,
-  children,
-  bg,
-  border,
-  iconColor,
-  textColor,
-}: {
-  tone: 'warning' | 'danger';
-  title: string;
-  children: React.ReactNode;
-  bg: string;
-  border: string;
-  iconColor: string;
-  textColor: string;
-}) => (
-  <div style={{
-    padding: '16px',
-    background: bg,
-    border: `1px solid ${border}`,
-    borderRadius: '8px',
-    display: 'flex',
-    gap: '12px',
-    alignItems: 'flex-start'
-  }}>
-    <svg width="20" height="20" viewBox="0 0 20 20" fill={iconColor}>
-      {tone === 'warning' ? (
-        <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
-      ) : (
-        <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
-      )}
-    </svg>
-    <div style={{ flex: 1 }}>
-      <div style={{ fontWeight: '600', color: textColor, marginBottom: '4px' }}>
-        {title}
-      </div>
-      <div style={{ fontSize: '14px', color: textColor }}>
-        {children}
-      </div>
-    </div>
-  </div>
-);
-
-/* =========================
-   Icons
-   ========================= */
-
-const IconSearch = (props: any) => (
-  <svg {...props} width="16" height="16" viewBox="0 0 20 20" fill="#9CA3AF">
-    <path fillRule="evenodd" d="M8 4a4 4 0 100 8 4 4 0 000-8zM2 8a6 6 0 1110.89 3.476l4.817 4.817a1 1 0 01-1.414 1.414l-4.816-4.816A6 6 0 012 8z" clipRule="evenodd" />
-  </svg>
-);
-
-const IconMoney = () => (
-  <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
-    <path d="M8.433 7.418c.155-.103.346-.196.567-.267v1.698a2.305 2.305 0 01-.567-.267C8.07 8.34 8 8.114 8 8c0-.114.07-.34.433-.582zM11 12.849v-1.698c.22.071.412.164.567.267.364.243.433.468.433.582 0 .114-.07.34-.433.582a2.305 2.305 0 01-.567.267z" />
-    <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-13a1 1 0 10-2 0v.092a4.535 4.535 0 00-1.676.662C6.602 6.234 6 7.009 6 8c0 .99.602 1.765 1.324 2.246.48.32 1.054.545 1.676.662v1.941c-.391-.127-.68-.317-.843-.504a1 1 0 10-1.51 1.31c.562.649 1.413 1.076 2.353 1.253V15a1 1 0 102 0v-.092a4.535 4.535 0 001.676-.662C13.398 13.766 14 12.991 14 12c0-.99-.602-1.765-1.324-2.246A4.535 4.535 0 0011 9.092V7.151c.391.127.68.317.843.504a1 1 0 101.511-1.31c-.563-.649-1.413-1.076-2.354-1.253V5z" clipRule="evenodd" />
-  </svg>
-);
-
-const IconCalendarMoney = () => (
-  <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
-    <path fillRule="evenodd" d="M6 2a1 1 0 00-1 1v1H4a2 2 0 00-2 2v10a2 2 0 002 2h12a2 2 0 002-2V6a2 2 0 00-2-2h-1V3a1 1 0 10-2 0v1H7V3a1 1 0 00-1-1zm0 5a1 1 0 000 2h8a1 1 0 100-2H6z" clipRule="evenodd" />
-  </svg>
-);
-
-const IconActive = () => (
-  <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
-    <path d="M9 2a1 1 0 000 2h2a1 1 0 100-2H9z" />
-    <path fillRule="evenodd" d="M4 5a2 2 0 012-2 1 1 0 000 2H6a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2a1 1 0 100 2 2 2 0 002 2v1a1 1 0 11-2 0v-1H6v1a1 1 0 11-2 0v-1a2 2 0 01-2-2V5z" clipRule="evenodd" />
-  </svg>
-);
-
-const IconVendors = () => (
-  <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
-    <path d="M13 6a3 3 0 11-6 0 3 3 0 016 0zM18 8a2 2 0 11-4 0 2 2 0 014 0zM14 15a4 4 0 00-8 0v3h8v-3zM6 8a2 2 0 11-4 0 2 2 0 014 0zM16 18v-3a5.972 5.972 0 00-.75-2.906A3.005 3.005 0 0119 15v3h-3zM4.75 12.094A5.973 5.973 0 004 15v3H1v-3a3 3 0 013.75-2.906z" />
-  </svg>
-);
-
-const IconPayment = () => (
-  <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
-    <path fillRule="evenodd" d="M4 4a2 2 0 00-2 2v4a2 2 0 002 2V6h10a2 2 0 00-2-2H4zm2 6a2 2 0 012-2h8a2 2 0 012 2v4a2 2 0 01-2 2H8a2 2 0 01-2-2v-4zm6 4a2 2 0 100-4 2 2 0 000 4z" clipRule="evenodd" />
-  </svg>
-);
-
-const IconGrid = () => (
-  <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor">
-    <path d="M5 3a2 2 0 00-2 2v2a2 2 0 002 2h2a2 2 0 002-2V5a2 2 0 00-2-2H5zM5 11a2 2 0 00-2 2v2a2 2 0 002 2h2a2 2 0 002-2v-2a2 2 0 00-2-2H5zM11 5a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V5zM13 11a2 2 0 00-2 2v2a2 2 0 002 2h2a2 2 0 002-2v-2a2 2 0 00-2-2h-2z" />
-  </svg>
-);
-
-const IconTable = () => (
-  <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor">
-    <path fillRule="evenodd" d="M5 4a3 3 0 00-3 3v6a3 3 0 003 3h10a3 3 0 003-3V7a3 3 0 00-3-3H5zm-1 9v-1h5v2H5a1 1 0 01-1-1zm7 1h4a1 1 0 001-1v-1h-5v2zm0-4h5V8h-5v2zM9 8H4v2h5V8z" clipRule="evenodd" />
-  </svg>
-);
-
-const IconBars = () => (
-  <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor">
-    <path d="M2 11a1 1 0 011-1h2a1 1 0 011 1v5a1 1 0 01-1 1H3a1 1 0 01-1-1v-5zM8 7a1 1 0 011-1h2a1 1 0 011 1v9a1 1 0 01-1 1H9a1 1 0 01-1-1V7zM14 4a1 1 0 011-1h2a1 1 0 011 1v12a1 1 0 01-1 1h-2a1 1 0 01-1-1V4z" />
-  </svg>
-);
-
-const IconBarsLarge = () => (
-  <svg width="64" height="64" viewBox="0 0 20 20" fill="#E5E7EB" style={{ margin: '0 auto 16px' }}>
-    <path d="M2 11a1 1 0 011-1h2a1 1 0 011 1v5a1 1 0 01-1 1H3a1 1 0 01-1-1v-5zM8 7a1 1 0 011-1h2a1 1 0 011 1v9a1 1 0 01-1 1H9a1 1 0 01-1-1V7zM14 4a1 1 0 011-1h2a1 1 0 011 1v12a1 1 0 01-1 1h-2a1 1 0 01-1-1V4z" />
-  </svg>
-);
-
-const IconPlus = () => (
-  <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor" style={{ marginRight: 6 }}>
-    <path fillRule="evenodd" d="M10 3a1 1 0 011 1v5h5a1 1 0 110 2h-5v5a1 1 0 11-2 0v-5H4a1 1 0 110-2h5V4a1 1 0 011-1z" clipRule="evenodd" />
-  </svg>
-);
-
-/* =========================
-   Buttons & Styles
-   ========================= */
-
-const ghostBtn: React.CSSProperties = {
-  padding: '8px 16px',
-  background: 'transparent',
-  border: 'none',
-  color: '#6B7280',
-  fontSize: '14px',
-  fontWeight: '500',
-  cursor: 'pointer',
-  borderRadius: '6px',
-  transition: 'all 0.2s'
-};
-
-const outlineBtn: React.CSSProperties = {
-  padding: '8px 16px',
-  background: 'transparent',
-  border: '1px solid #E5E7EB',
-  color: '#374151',
-  fontSize: '14px',
-  fontWeight: '500',
-  cursor: 'pointer',
-  borderRadius: '6px',
-  transition: 'all 0.2s'
-};
-
-const primaryBtn: React.CSSProperties = {
-  padding: '8px 16px',
-  background: '#4F46E5',
-  color: '#FFFFFF',
-  border: 'none',
-  borderRadius: '6px',
-  fontSize: '14px',
-  fontWeight: '500',
-  cursor: 'pointer',
-  display: 'flex',
-  alignItems: 'center',
-  gap: '6px',
-  transition: 'background 0.2s'
-};
-
-const selectStyle: React.CSSProperties = {
-  padding: '8px 12px',
-  border: '1px solid #E5E7EB',
-  borderRadius: '6px',
-  fontSize: '14px',
-  background: '#FFFFFF',
-  cursor: 'pointer',
-  minWidth: '120px',
-  outline: 'none',
-};
-
-const hoverFill = (e: React.MouseEvent<HTMLButtonElement>) => {
-  e.currentTarget.style.background = '#F3F4F6';
-};
-const hoverReset = (e: React.MouseEvent<HTMLButtonElement>) => {
-  e.currentTarget.style.background = 'transparent';
-};
-
-const fullHeightCenter = (bg: string): React.CSSProperties => ({
-  minHeight: '100vh',
-  display: 'flex',
-  alignItems: 'center',
-  justifyContent: 'center',
-  background: bg,
-});
-
-const cardBox = (pad: number): React.CSSProperties => ({
-  background: '#FFFFFF',
-  border: '1px solid #E5E7EB',
-  borderRadius: '8px',
-  padding: `${pad}px`,
-  textAlign: 'center'
-});
-
-const backdrop: React.CSSProperties = {
-  position: 'fixed',
-  top: 0, left: 0, right: 0, bottom: 0,
-  background: 'rgba(0, 0, 0, 0.5)',
-  display: 'flex',
-  alignItems: 'center',
-  justifyContent: 'center',
-  padding: '20px',
-  zIndex: 1000
-};
-
-const modalBox = (maxWidth: number): React.CSSProperties => ({
-  background: '#FFFFFF',
-  borderRadius: '12px',
-  width: '100%',
-  maxWidth: `${maxWidth}px`,
-  maxHeight: '90vh',
-  overflow: 'auto',
-  boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.25)'
-});
-
-/* =========================
-   Reusable Pieces
-   ========================= */
-
-const ModalHeader = ({ title, onClose }: { title: string; onClose: () => void }) => (
-  <div style={{
-    padding: '24px',
-    borderBottom: '1px solid #E5E7EB',
-    display: 'flex',
-    justifyContent: 'space-between',
-    alignItems: 'center'
-  }}>
-    <h2 style={{ fontSize: '20px', fontWeight: '600', color: '#111827', margin: 0 }}>
-      {title}
-    </h2>
-    <button onClick={onClose} style={{
-      width: '32px',
-      height: '32px',
-      border: 'none',
-      background: '#F3F4F6',
-      borderRadius: '6px',
-      cursor: 'pointer',
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      color: '#6B7280'
-    }}>
-      <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
-        <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
-      </svg>
-    </button>
-  </div>
-);
-
-/* =========================
-   Metric Card
-   ========================= */
-
-const MetricCard = ({ label, value, sublabel, trend, trendUp, alert, icon }: any) => (
-  <div style={{
-    background: '#FFFFFF',
-    border: alert ? '1px solid #FCA5A5' : '1px solid #E5E7EB',
-    borderRadius: '8px',
-    padding: '20px',
-    position: 'relative',
-    transition: 'all 0.2s'
-  }}>
-    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '12px' }}>
-      <div style={{
-        width: '40px',
-        height: '40px',
-        background: alert ? '#FEE2E2' : '#F3F4F6',
-        borderRadius: '8px',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        color: alert ? '#DC2626' : '#6B7280'
-      }}>
-        {icon}
-      </div>
-      {trend && (
-        <span style={{
-          padding: '2px 8px',
-          borderRadius: '12px',
-          fontSize: '12px',
-          fontWeight: '500',
-          background: trendUp ? '#D1FAE5' : '#FEE2E2',
-          color: trendUp ? '#065F46' : '#991B1B',
-          display: 'flex',
-          alignItems: 'center',
-          gap: '2px'
-        }}>
-          {trendUp ? '↑' : '↓'} {trend}
-        </span>
-      )}
-    </div>
-    <div style={{ fontSize: '24px', fontWeight: '700', color: '#111827', marginBottom: '4px' }}>
-      {value}
-    </div>
-    <div style={{ fontSize: '14px', color: '#6B7280' }}>
-      {label}
-    </div>
-    {sublabel && (
-      <div style={{ fontSize: '12px', color: '#9CA3AF', marginTop: '2px' }}>
-        {sublabel}
-      </div>
-    )}
-  </div>
-);
-
-/* =========================
-   View Toggle Button
-   ========================= */
-
-const ViewToggleButton = ({ active, onClick, children, first, last }: any) => (
-  <button
-    onClick={onClick}
-    style={{
-      padding: '6px 10px',
-      background: active ? '#F3F4F6' : '#FFFFFF',
-      color: active ? '#4F46E5' : '#6B7280',
-      border: 'none',
-      borderLeft: !first ? '1px solid #E5E7EB' : 'none',
-      fontSize: '14px',
-      cursor: 'pointer',
-      display: 'flex',
-      alignItems: 'center',
-      transition: 'all 0.2s'
-    }}>
-    {children}
-  </button>
-);
-
-/* =========================
-   Empty State
-   ========================= */
-
-const EmptyState = ({ onAddClick }: any) => (
-  <div style={cardBox(48)}>
-    <svg width="64" height="64" viewBox="0 0 20 20" fill="#E5E7EB" style={{ margin: '0 auto 16px' }}>
-      <path fillRule="evenodd" d="M5 2a2 2 0 00-2 2v14l3.5-2 3.5 2 3.5-2 3.5 2V4a2 2 0 00-2-2H5zm2.5 3a1.5 1.5 0 100 3 1.5 1.5 0 000-3zm6.207.293a1 1 0 00-1.414 0l-6 6a1 1 0 101.414 1.414l6-6a1 1 0 000-1.414zM12.5 10a1.5 1.5 0 100 3 1.5 1.5 0 000-3z" clipRule="evenodd" />
-    </svg>
-    <h3 style={{ fontSize: '18px', fontWeight: '600', color: '#111827', marginBottom: '8px' }}>
-      No subscriptions found
-    </h3>
-    <p style={{ color: '#6B7280', fontSize: '14px', marginBottom: '24px' }}>
-      Get started by adding your first subscription to begin tracking
-    </p>
+const QuickActions = ({ onQuickAdd, onDetectDuplicates, onManageBudgets }: any) => (
+  <div style={{ display: 'flex', gap: '8px' }}>
     <button
-      onClick={onAddClick}
-      style={primaryBtn}
-      onMouseEnter={e => e.currentTarget.style.background = '#4338CA'}
-      onMouseLeave={e => e.currentTarget.style.background = '#4F46E5'}
+      onClick={onQuickAdd}
+      style={{ ...ghostBtn, padding: '6px 10px', fontSize: '13px' }}
+      title="Quick Add (Ctrl+N)"
     >
-      <IconPlus />
-      Add Your First Subscription
+      ⚡ Quick Add
+    </button>
+    <button
+      onClick={onDetectDuplicates}
+      style={{ ...ghostBtn, padding: '6px 10px', fontSize: '13px' }}
+      title="Find Duplicates"
+    >
+      🔍 Duplicates
+    </button>
+    <button
+      onClick={onManageBudgets}
+      style={{ ...ghostBtn, padding: '6px 10px', fontSize: '13px' }}
+      title="Budget Settings"
+    >
+      💰 Budgets
     </button>
   </div>
 );
 
-/* =========================
-   Subscription Card
-   ========================= */
+const AlertsSection = ({ upcomingRenewals, overdueCount, underutilizedCount, budgetUsage, formatDate }: any) => {
+  const alerts = [];
+  
+  if (upcomingRenewals.length > 0) {
+    alerts.push({
+      type: 'warning',
+      title: `${upcomingRenewals.length} Upcoming Renewal${upcomingRenewals.length > 1 ? 's' : ''}`,
+      content: upcomingRenewals.slice(0, 3).map((sub: any, idx: number) => (
+        <span key={sub.id}>
+          {sub.service} ({formatDate(sub.nextBilling)})
+          {idx < Math.min(2, upcomingRenewals.length - 1) ? ' • ' : ''}
+        </span>
+      )),
+      iconColor: '#F59E0B',
+      bg: '#FEF3C7',
+      border: '#FCD34D',
+      textColor: '#78350F'
+    });
+  }
+  
+  if (overdueCount > 0) {
+    alerts.push({
+      type: 'danger',
+      title: `${overdueCount} Overdue Payment${overdueCount > 1 ? 's' : ''}`,
+      content: 'Review and process overdue payments to avoid service disruptions',
+      iconColor: '#DC2626',
+      bg: '#FEE2E2',
+      border: '#FCA5A5',
+      textColor: '#7F1D1D'
+    });
+  }
+  
+  if (underutilizedCount > 0) {
+    alerts.push({
+      type: 'info',
+      title: `${underutilizedCount} Underutilized Subscription${underutilizedCount > 1 ? 's' : ''}`,
+      content: 'Some subscriptions are using less than 30% of available seats',
+      iconColor: '#2563EB',
+      bg: '#DBEAFE',
+      border: '#93C5FD',
+      textColor: '#1E3A8A'
+    });
+  }
+  
+  if (budgetUsage > 80) {
+    alerts.push({
+      type: 'warning',
+      title: `Budget Alert: ${budgetUsage.toFixed(0)}% Used`,
+      content: 'Monthly spending is approaching budget limit',
+      iconColor: '#F59E0B',
+      bg: '#FEF3C7',
+      border: '#FCD34D',
+      textColor: '#78350F'
+    });
+  }
+  
+  if (alerts.length === 0) return null;
+  
+  return (
+    <div style={{ marginBottom: '24px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+      {alerts.map((alert, idx) => (
+        <Alert key={idx} {...alert} />
+      ))}
+    </div>
+  );
+};
 
-const SubscriptionCard = ({
+const EnhancedMetrics = ({ stats, formatCurrency }: any) => (
+  <div style={{
+    display: 'grid',
+    gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
+    gap: '20px',
+    marginBottom: '32px'
+  }}>
+    <MetricCard
+      label="Monthly Spend"
+      value={formatCurrency(parseFloat(stats.monthly))}
+      trend={stats.trend + '%'}
+      trendUp={parseFloat(stats.trend) > 0}
+      icon={<IconMoney />}
+    />
+    <MetricCard
+      label="Annual Projection"
+      value={formatCurrency(parseFloat(stats.yearly))}
+      sublabel={stats.budgetUsage > 0 ? `${stats.budgetUsage.toFixed(0)}% of budget` : null}
+      icon={<IconCalendarMoney />}
+    />
+    <MetricCard
+      label="Active Subscriptions"
+      value={stats.active.toString()}
+      sublabel={`of ${stats.total} total`}
+      icon={<IconActive />}
+    />
+    <MetricCard
+      label="Health Score"
+      value={`${stats.avgHealthScore.toFixed(0)}/100`}
+      sublabel={stats.underutilized > 0 ? `${stats.underutilized} underutilized` : 'All optimized'}
+      alert={stats.avgHealthScore < 70}
+      icon={<IconHealth />}
+    />
+    <MetricCard
+      label="Payment Status"
+      value={`${stats.paidCount}/${stats.total}`}
+      sublabel="paid this period"
+      alert={stats.overdueCount > 0}
+      icon={<IconPayment />}
+    />
+    <MetricCard
+      label="Vendors"
+      value={stats.vendors.toString()}
+      sublabel="unique providers"
+      icon={<IconVendors />}
+    />
+  </div>
+);
+
+const BulkActionsBar = ({ selectedCount, onDelete, onStatusChange, onCancel }: any) => (
+  <div style={{
+    padding: '12px',
+    background: '#F3F4F6',
+    borderRadius: '6px',
+    marginBottom: '12px',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between'
+  }}>
+    <span style={{ fontSize: '14px', fontWeight: '500', color: '#374151' }}>
+      {selectedCount} item{selectedCount !== 1 ? 's' : ''} selected
+    </span>
+    <div style={{ display: 'flex', gap: '8px' }}>
+      <button
+        onClick={() => onStatusChange('active')}
+        style={{ ...ghostBtn, background: '#FFFFFF', border: '1px solid #E5E7EB' }}
+      >
+        Mark Active
+      </button>
+      <button
+        onClick={() => onStatusChange('cancelled')}
+        style={{ ...ghostBtn, background: '#FFFFFF', border: '1px solid #E5E7EB' }}
+      >
+        Cancel
+      </button>
+      <button
+        onClick={onDelete}
+        style={{ ...ghostBtn, background: '#FEE2E2', color: '#DC2626' }}
+      >
+        Delete Selected
+      </button>
+      <button onClick={onCancel} style={ghostBtn}>
+        Cancel
+      </button>
+    </div>
+  </div>
+);
+
+const SavedFiltersDropdown = ({ filters, onLoad, onDelete }: any) => {
+  const [isOpen, setIsOpen] = useState(false);
+  
+  return (
+    <div style={{ position: 'relative' }}>
+      <button
+        onClick={() => setIsOpen(!isOpen)}
+        style={selectStyle}
+      >
+        Saved Filters ({filters.length})
+      </button>
+      {isOpen && (
+        <div style={{
+          position: 'absolute',
+          top: '100%',
+          left: 0,
+          marginTop: '4px',
+          background: '#FFFFFF',
+          border: '1px solid #E5E7EB',
+          borderRadius: '6px',
+          boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)',
+          zIndex: 10,
+          minWidth: '200px'
+        }}>
+          {filters.map((filter: any) => (
+            <div
+              key={filter.id}
+              style={{
+                padding: '8px 12px',
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                borderBottom: '1px solid #F3F4F6',
+                cursor: 'pointer'
+              }}
+              onMouseEnter={e => e.currentTarget.style.background = '#F9FAFB'}
+              onMouseLeave={e => e.currentTarget.style.background = '#FFFFFF'}
+            >
+              <span
+                onClick={() => {
+                  onLoad(filter);
+                  setIsOpen(false);
+                }}
+                style={{ fontSize: '14px', color: '#374151', flex: 1 }}
+              >
+                {filter.name}
+              </span>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onDelete(filter.id);
+                }}
+                style={{
+                  padding: '2px',
+                  background: 'none',
+                  border: 'none',
+                  color: '#DC2626',
+                  cursor: 'pointer'
+                }}
+              >
+                ×
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
+const EnhancedSubscriptionCard = ({
   subscription: sub,
+  selected,
+  onToggleSelect,
   onEdit,
   onDelete,
   onViewDocuments,
@@ -1366,34 +1593,23 @@ const SubscriptionCard = ({
   onUpload,
   formatCurrency,
   formatDate,
-  getCompanyColor,
-  displayAmount
+  getCompanyColor
 }: any) => {
-  const getStatusColor = (status: string) => {
-    switch (status) {
-      case 'active': return { bg: '#D1FAE5', text: '#065F46' };
-      case 'pending': return { bg: '#FEF3C7', text: '#78350F' };
-      case 'cancelled': return { bg: '#FEE2E2', text: '#991B1B' };
-      default: return { bg: '#F3F4F6', text: '#6B7280' };
-    }
-  };
-  const getPaymentStatusColor = (status?: string) => {
-    switch (status) {
-      case 'paid': return { bg: '#D1FAE5', text: '#065F46' };
-      case 'pending': return { bg: '#FEF3C7', text: '#78350F' };
-      case 'overdue': return { bg: '#FEE2E2', text: '#991B1B' };
-      default: return { bg: '#F3F4F6', text: '#6B7280' };
-    }
+  const getHealthColor = (score: number) => {
+    if (score >= 70) return '#10B981';
+    if (score >= 40) return '#F59E0B';
+    return '#EF4444';
   };
 
-  const statusColors = getStatusColor(sub.status);
-  const paymentColors = getPaymentStatusColor(sub.lastPaymentStatus);
+  const displayAmount = sub.pricingType === 'variable' && typeof sub.currentMonthCost === 'number'
+    ? sub.currentMonthCost
+    : sub.cost;
 
   return (
     <div
       style={{
         background: '#FFFFFF',
-        border: sub.lastPaymentStatus === 'overdue' ? '1px solid #FCA5A5' : '1px solid #E5E7EB',
+        border: selected ? '2px solid #4F46E5' : sub.lastPaymentStatus === 'overdue' ? '1px solid #FCA5A5' : '1px solid #E5E7EB',
         borderRadius: '8px',
         padding: '20px',
         transition: 'all 0.2s',
@@ -1402,8 +1618,37 @@ const SubscriptionCard = ({
       onMouseEnter={e => { e.currentTarget.style.boxShadow = '0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06)'; }}
       onMouseLeave={e => { e.currentTarget.style.boxShadow = 'none'; }}
     >
+      {/* Selection Checkbox */}
+      <div style={{ position: 'absolute', top: '12px', left: '12px' }}>
+        <input
+          type="checkbox"
+          checked={selected}
+          onChange={onToggleSelect}
+          style={{ cursor: 'pointer' }}
+        />
+      </div>
+
+      {/* Health Indicator */}
+      <div style={{
+        position: 'absolute',
+        top: '12px',
+        right: '12px',
+        width: '32px',
+        height: '32px',
+        borderRadius: '50%',
+        border: `2px solid ${getHealthColor(sub.healthScore || 100)}`,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        fontSize: '10px',
+        fontWeight: 'bold',
+        color: getHealthColor(sub.healthScore || 100)
+      }}>
+        {sub.healthScore || 100}
+      </div>
+
       {/* Header */}
-      <div style={{ marginBottom: '16px' }}>
+      <div style={{ marginBottom: '16px', paddingLeft: '24px' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '8px' }}>
           <div style={{ flex: 1 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
@@ -1434,14 +1679,10 @@ const SubscriptionCard = ({
               </div>
             )}
           </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', alignItems: 'flex-end' }}>
-            <span style={badge(statusColors)}>{sub.status.toUpperCase()}</span>
-            <span style={badge(paymentColors)}>{(sub.lastPaymentStatus || 'pending').toUpperCase()}</span>
-          </div>
         </div>
       </div>
 
-      {/* Cost (shows actual for variable when available) */}
+      {/* Cost */}
       <div style={{ marginBottom: '16px' }}>
         <div style={{ fontSize: '24px', fontWeight: '700', color: '#111827' }}>
           {formatCurrency(displayAmount)}
@@ -1449,7 +1690,34 @@ const SubscriptionCard = ({
             /{sub.billing === 'monthly' ? 'mo' : sub.billing === 'yearly' ? 'yr' : 'qtr'}
           </span>
         </div>
+        {sub.pricingType === 'variable' && sub.lastMonthCost !== null && (
+          <div style={{ fontSize: '12px', color: '#6B7280', marginTop: '4px' }}>
+            Last month: {formatCurrency(sub.lastMonthCost)}
+          </div>
+        )}
       </div>
+
+      {/* Usage Bar (if seats data available) */}
+      {sub.seats && sub.seatsUsed !== undefined && (
+        <div style={{ marginBottom: '16px' }}>
+          <div style={{ fontSize: '12px', color: '#6B7280', marginBottom: '4px' }}>
+            Seat Usage: {sub.seatsUsed}/{sub.seats} ({((sub.seatsUsed / sub.seats) * 100).toFixed(0)}%)
+          </div>
+          <div style={{
+            height: '4px',
+            background: '#E5E7EB',
+            borderRadius: '2px',
+            overflow: 'hidden'
+          }}>
+            <div style={{
+              width: `${Math.min(100, (sub.seatsUsed / sub.seats) * 100)}%`,
+              height: '100%',
+              background: sub.seatsUsed / sub.seats > 0.9 ? '#F59E0B' : '#10B981',
+              transition: 'width 0.3s'
+            }} />
+          </div>
+        </div>
+      )}
 
       {/* Details */}
       <div style={{ marginBottom: '16px', display: 'grid', gap: '8px' }}>
@@ -1457,6 +1725,15 @@ const SubscriptionCard = ({
         <DetailRow label="Category" value={sub.category} />
         {sub.manager && <DetailRow label="Manager" value={sub.manager} />}
         <DetailRow label="Documents" value={`${sub.attachments?.length ?? sub.attachment_count ?? 0} files`} />
+        <DetailRow 
+          label="Status" 
+          value={
+            <div style={{ display: 'flex', gap: '4px' }}>
+              <StatusBadge status={sub.status} />
+              <PaymentStatusBadge status={sub.lastPaymentStatus} />
+            </div>
+          } 
+        />
       </div>
 
       {/* Actions */}
@@ -1472,7 +1749,7 @@ const SubscriptionCard = ({
           <svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor">
             <path fillRule="evenodd" d="M4 4a2 2 0 00-2 2v8a2 2 0 002 2h12a2 2 0 002-2V6a2 2 0 00-2-2h-5L9 2H4z" clipRule="evenodd" />
           </svg>
-          Documents
+          Docs
         </ActionButton>
 
         {sub.lastPaymentStatus !== 'paid' && (
@@ -1480,134 +1757,27 @@ const SubscriptionCard = ({
             <svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor">
               <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
             </svg>
-            Mark Paid
+            Pay
           </ActionButton>
         )}
 
-        <ActionButton onClick={onLogCost}>
-          <svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor">
-            <path d="M4 3a1 1 0 000 2h12a1 1 0 100-2H4zM3 8a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm1 4a1 1 0 000 2h12a1 1 0 100-2H4zm-1 5a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1z" />
-          </svg>
-          Log Cost
-        </ActionButton>
-
-        <label style={uploadBtn}
-          onMouseEnter={e => {
-            e.currentTarget.style.background = '#F9FAFB';
-            (e.currentTarget.style as any).borderColor = '#D1D5DB';
-          }}
-          onMouseLeave={e => {
-            e.currentTarget.style.background = '#FFFFFF';
-            (e.currentTarget.style as any).borderColor = '#E5E7EB';
-          }}
-        >
-          <svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor">
-            <path fillRule="evenodd" d="M8 4a3 3 0 00-3 3v4a3 3 0 003 3h4a3 3 0 003-3V7a3 3 0 00-3-3H8zm0 2h4a1 1 0 011 1v4a1 1 0 01-1 1H8a1 1 0 01-1-1V7a1 1 0 011-1z" clipRule="evenodd" />
-            <path d="M8 9a1 1 0 000 2h4a1 1 0 100-2H8z" />
-          </svg>
-          Upload
-          <input
-            type="file"
-            style={{ display: 'none' }}
-            onChange={onUpload}
-            accept=".pdf,.doc,.docx,.jpg,.jpeg,.png"
-          />
-        </label>
+        {sub.pricingType === 'variable' && (
+          <ActionButton onClick={onLogCost}>
+            <svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor">
+              <path d="M4 3a1 1 0 000 2h12a1 1 0 100-2H4zM3 8a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm1 4a1 1 0 000 2h12a1 1 0 100-2H4zm-1 5a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1z" />
+            </svg>
+            Log
+          </ActionButton>
+        )}
       </div>
     </div>
   );
 };
 
-const badge = (c: { bg: string; text: string }): React.CSSProperties => ({
-  padding: '2px 8px',
-  borderRadius: '12px',
-  fontSize: '11px',
-  fontWeight: '500',
-  background: c.bg,
-  color: c.text
-});
-
-const uploadBtn: React.CSSProperties = {
-  padding: '6px',
-  border: '1px solid #E5E7EB',
-  borderRadius: '6px',
-  fontSize: '12px',
-  fontWeight: '500',
-  cursor: 'pointer',
-  display: 'flex',
-  alignItems: 'center',
-  justifyContent: 'center',
-  gap: '4px',
-  color: '#6B7280',
-  background: '#FFFFFF',
-  transition: 'all 0.2s'
-};
-
-/* =========================
-   Detail Row
-   ========================= */
-
-const DetailRow = ({ label, value }: any) => (
-  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-    <span style={{ fontSize: '12px', color: '#6B7280' }}>{label}</span>
-    <span style={{ fontSize: '12px', fontWeight: '500', color: '#111827' }}>{value}</span>
-  </div>
-);
-
-/* =========================
-   Action Button
-   ========================= */
-
-const ActionButton = ({ onClick, children, primary, success, danger }: any) => {
-  let baseColor = '#6B7280';
-  let hoverColor = '#4B5563';
-  let bgColor = '#FFFFFF';
-  let hoverBg = '#F9FAFB';
-
-  if (primary) { baseColor = '#4F46E5'; hoverColor = '#4338CA'; }
-  else if (success) { baseColor = '#059669'; hoverColor = '#047857'; }
-  else if (danger) { baseColor = '#DC2626'; hoverColor = '#B91C1C'; }
-
-  return (
-    <button
-      onClick={onClick}
-      style={{
-        padding: '6px',
-        border: '1px solid #E5E7EB',
-        borderRadius: '6px',
-        fontSize: '12px',
-        fontWeight: '500',
-        cursor: 'pointer',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        gap: '4px',
-        color: baseColor,
-        background: bgColor,
-        transition: 'all 0.2s'
-      }}
-      onMouseEnter={e => {
-        e.currentTarget.style.background = hoverBg;
-        (e.currentTarget.style as any).borderColor = '#D1D5DB';
-        e.currentTarget.style.color = hoverColor;
-      }}
-      onMouseLeave={e => {
-        e.currentTarget.style.background = bgColor;
-        (e.currentTarget.style as any).borderColor = '#E5E7EB';
-        e.currentTarget.style.color = baseColor;
-      }}
-    >
-      {children}
-    </button>
-  );
-};
-
-/* =========================
-   Table View & Helpers
-   ========================= */
-
-const TableView = ({
+const EnhancedTableView = ({
   subscriptions,
+  selectedIds,
+  onToggleSelect,
   onEdit,
   onDelete,
   onMarkPaid,
@@ -1628,18 +1798,32 @@ const TableView = ({
       <table style={{ width: '100%', borderCollapse: 'collapse' }}>
         <thead>
           <tr style={{ background: '#F9FAFB', borderBottom: '1px solid #E5E7EB' }}>
+            <th style={{ ...th, width: '40px' }}>
+              <input
+                type="checkbox"
+                checked={selectedIds.size === subscriptions.length && subscriptions.length > 0}
+                onChange={() => {
+                  if (selectedIds.size === subscriptions.length) {
+                    onToggleSelect(new Set());
+                  } else {
+                    subscriptions.forEach((sub: any) => onToggleSelect(sub.id));
+                  }
+                }}
+              />
+            </th>
+            <th style={th}>Health</th>
             <th style={th}>Company</th>
             <th style={th}>Service</th>
             <th style={th}>Cost</th>
+            <th style={th}>Usage</th>
             <th style={th}>Status</th>
             <th style={th}>Payment</th>
             <th style={th}>Next Billing</th>
-            <th style={th}>Manager</th>
             <th style={{ ...th, textAlign: 'right' }}>Actions</th>
           </tr>
         </thead>
         <tbody>
-          {subscriptions.map((sub: Subscription, idx: number) => {
+          {subscriptions.map((sub: any, idx: number) => {
             const displayAmount =
               sub.pricingType === 'variable' && typeof sub.currentMonthCost === 'number'
                 ? sub.currentMonthCost
@@ -1650,11 +1834,22 @@ const TableView = ({
                 key={sub.id}
                 style={{
                   borderBottom: idx !== subscriptions.length - 1 ? '1px solid #E5E7EB' : 'none',
-                  transition: 'background 0.2s'
+                  transition: 'background 0.2s',
+                  background: selectedIds.has(sub.id) ? '#F3F4F6' : '#FFFFFF'
                 }}
-                onMouseEnter={e => e.currentTarget.style.background = '#F9FAFB'}
-                onMouseLeave={e => e.currentTarget.style.background = '#FFFFFF'}
+                onMouseEnter={e => { if (!selectedIds.has(sub.id)) e.currentTarget.style.background = '#F9FAFB'; }}
+                onMouseLeave={e => { if (!selectedIds.has(sub.id)) e.currentTarget.style.background = '#FFFFFF'; }}
               >
+                <td style={td}>
+                  <input
+                    type="checkbox"
+                    checked={selectedIds.has(sub.id)}
+                    onChange={() => onToggleSelect(sub.id)}
+                  />
+                </td>
+                <td style={td}>
+                  <HealthIndicator score={sub.healthScore || 100} />
+                </td>
                 <td style={td}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                     <div style={{
@@ -1685,6 +1880,18 @@ const TableView = ({
                       /{sub.billing === 'monthly' ? 'mo' : sub.billing === 'yearly' ? 'yr' : 'qtr'}
                     </span>
                   </div>
+                  {sub.pricingType === 'variable' && sub.lastMonthCost !== null && (
+                    <div style={{ fontSize: '11px', color: '#6B7280' }}>
+                      Last: {formatCurrency(sub.lastMonthCost)}
+                    </div>
+                  )}
+                </td>
+                <td style={td}>
+                  {sub.seats ? (
+                    <UsageIndicator used={sub.seatsUsed || 0} total={sub.seats} />
+                  ) : (
+                    <span style={{ fontSize: '14px', color: '#9CA3AF' }}>-</span>
+                  )}
                 </td>
                 <td style={td}>
                   <StatusBadge status={sub.status} />
@@ -1694,9 +1901,6 @@ const TableView = ({
                 </td>
                 <td style={{ ...td, fontSize: '14px', color: '#6B7280' }}>
                   {formatDate(sub.nextBilling)}
-                </td>
-                <td style={{ ...td, fontSize: '14px', color: '#6B7280' }}>
-                  {sub.manager || '-'}
                 </td>
                 <td style={td}>
                   <div style={{ display: 'flex', gap: '4px', justifyContent: 'flex-end' }}>
@@ -1708,11 +1912,6 @@ const TableView = ({
                     <TableActionButton onClick={() => onViewDocuments(sub)} title="Documents">
                       <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor">
                         <path fillRule="evenodd" d="M4 4a2 2 0 00-2 2v8a2 2 0 002 2h12a2 2 0 002-2V6a2 2 0 00-2-2h-5L9 2H4z" clipRule="evenodd" />
-                      </svg>
-                    </TableActionButton>
-                    <TableActionButton onClick={() => onLogCost(sub.id)} title="Log Cost">
-                      <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor">
-                        <path d="M4 3a1 1 0 000 2h12a1 1 0 100-2H4zM3 8a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm1 4a1 1 0 000 2h12a1 1 0 100-2H4zm-1 5a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1z" />
                       </svg>
                     </TableActionButton>
                     {sub.lastPaymentStatus !== 'paid' && (
@@ -1738,85 +1937,602 @@ const TableView = ({
   </div>
 );
 
-const th: React.CSSProperties = {
-  padding: '12px 16px',
-  textAlign: 'left',
-  fontSize: '12px',
-  fontWeight: 600,
-  color: '#374151'
-};
-const td: React.CSSProperties = { padding: '12px 16px' };
-const tagPill: React.CSSProperties = {
-  padding: '1px 6px',
-  background: '#F3F4F6',
-  borderRadius: '10px',
-  fontSize: '10px',
-  color: '#6B7280'
+const AnalyticsView = ({ subscriptions, formatCurrency, forecastData, dateRange, onDateRangeChange }: any) => {
+  const categorySpend = useMemo(() => {
+    const spend: { [key: string]: number } = {};
+    subscriptions.forEach((sub: any) => {
+      if (sub.status !== 'active') return;
+      const monthly = sub.pricingType === 'variable' && sub.currentMonthCost 
+        ? sub.currentMonthCost 
+        : sub.cost / (sub.billing === 'yearly' ? 12 : sub.billing === 'quarterly' ? 3 : 1);
+      spend[sub.category || 'Other'] = (spend[sub.category || 'Other'] || 0) + monthly;
+    });
+    return Object.entries(spend).map(([category, amount]) => ({ category, amount }));
+  }, [subscriptions]);
+
+  const companySpend = useMemo(() => {
+    const spend: { [key: string]: number } = {};
+    subscriptions.forEach((sub: any) => {
+      if (sub.status !== 'active') return;
+      const monthly = sub.pricingType === 'variable' && sub.currentMonthCost 
+        ? sub.currentMonthCost 
+        : sub.cost / (sub.billing === 'yearly' ? 12 : sub.billing === 'quarterly' ? 3 : 1);
+      spend[sub.company] = (spend[sub.company] || 0) + monthly;
+    });
+    return Object.entries(spend).map(([company, amount]) => ({ company, amount }));
+  }, [subscriptions]);
+
+  const topExpenses = useMemo(() => {
+    return [...subscriptions]
+      .filter(sub => sub.status === 'active')
+      .sort((a, b) => {
+        const aMonthly = a.pricingType === 'variable' && a.currentMonthCost 
+          ? a.currentMonthCost 
+          : a.cost / (a.billing === 'yearly' ? 12 : a.billing === 'quarterly' ? 3 : 1);
+        const bMonthly = b.pricingType === 'variable' && b.currentMonthCost 
+          ? b.currentMonthCost 
+          : b.cost / (b.billing === 'yearly' ? 12 : b.billing === 'quarterly' ? 3 : 1);
+        return bMonthly - aMonthly;
+      })
+      .slice(0, 10);
+  }, [subscriptions]);
+
+  return (
+    <div style={{ display: 'grid', gap: '24px' }}>
+      {/* Date Range Selector */}
+      <div style={{
+        background: '#FFFFFF',
+        border: '1px solid #E5E7EB',
+        borderRadius: '8px',
+        padding: '16px',
+        display: 'flex',
+        gap: '12px',
+        alignItems: 'center'
+      }}>
+        <span style={{ fontSize: '14px', fontWeight: '500', color: '#374151' }}>Time Period:</span>
+        {['30d', '90d', '1y', 'all'].map(range => (
+          <button
+            key={range}
+            onClick={() => onDateRangeChange(range)}
+            style={{
+              padding: '6px 12px',
+              borderRadius: '6px',
+              border: dateRange === range ? 'none' : '1px solid #E5E7EB',
+              background: dateRange === range ? '#4F46E5' : '#FFFFFF',
+              color: dateRange === range ? '#FFFFFF' : '#6B7280',
+              fontSize: '14px',
+              cursor: 'pointer',
+              transition: 'all 0.2s'
+            }}
+          >
+            {range === '30d' ? '30 Days' : range === '90d' ? '90 Days' : range === '1y' ? '1 Year' : 'All Time'}
+          </button>
+        ))}
+      </div>
+
+      {/* Charts Grid */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(400px, 1fr))', gap: '24px' }}>
+        {/* Category Distribution */}
+        <ChartCard title="Spending by Category">
+          {categorySpend.map(({ category, amount }) => (
+            <div key={category} style={{ marginBottom: '12px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                <span style={{ fontSize: '14px', color: '#374151' }}>{category}</span>
+                <span style={{ fontSize: '14px', fontWeight: '600', color: '#111827' }}>
+                  {formatCurrency(amount)}/mo
+                </span>
+              </div>
+              <div style={{
+                height: '8px',
+                background: '#E5E7EB',
+                borderRadius: '4px',
+                overflow: 'hidden'
+              }}>
+                <div style={{
+                  width: `${(amount / Math.max(...categorySpend.map(c => c.amount))) * 100}%`,
+                  height: '100%',
+                  background: '#4F46E5',
+                  transition: 'width 0.3s'
+                }} />
+              </div>
+            </div>
+          ))}
+        </ChartCard>
+
+        {/* Company Distribution */}
+        <ChartCard title="Spending by Company">
+          {companySpend.map(({ company, amount }) => (
+            <div key={company} style={{ marginBottom: '12px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                <span style={{ fontSize: '14px', color: '#374151' }}>{company}</span>
+                <span style={{ fontSize: '14px', fontWeight: '600', color: '#111827' }}>
+                  {formatCurrency(amount)}/mo
+                </span>
+              </div>
+              <div style={{
+                height: '8px',
+                background: '#E5E7EB',
+                borderRadius: '4px',
+                overflow: 'hidden'
+              }}>
+                <div style={{
+                  width: `${(amount / Math.max(...companySpend.map(c => c.amount))) * 100}%`,
+                  height: '100%',
+                  background: '#059669',
+                  transition: 'width 0.3s'
+                }} />
+              </div>
+            </div>
+          ))}
+        </ChartCard>
+
+        {/* Cost Forecast */}
+        <ChartCard title="6-Month Cost Forecast">
+          {forecastData.map((point: any) => (
+            <div key={point.month} style={{ marginBottom: '12px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                <span style={{ fontSize: '14px', color: '#374151' }}>
+                  {new Date(point.month + '-01').toLocaleDateString('en-US', { month: 'short', year: 'numeric' })}
+                </span>
+                <span style={{ fontSize: '14px', fontWeight: '600', color: '#111827' }}>
+                  {formatCurrency(point.predicted)}
+                </span>
+              </div>
+              <div style={{
+                height: '8px',
+                background: '#E5E7EB',
+                borderRadius: '4px',
+                overflow: 'hidden'
+              }}>
+                <div style={{
+                  width: `${(point.predicted / Math.max(...forecastData.map((p: any) => p.predicted))) * 100}%`,
+                  height: '100%',
+                  background: point.confidence === 'high' ? '#10B981' : point.confidence === 'medium' ? '#F59E0B' : '#EF4444',
+                  transition: 'width 0.3s'
+                }} />
+              </div>
+            </div>
+          ))}
+        </ChartCard>
+
+        {/* Top Expenses */}
+        <ChartCard title="Top 10 Expenses">
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+            {topExpenses.map((sub: any, idx: number) => {
+              const monthly = sub.pricingType === 'variable' && sub.currentMonthCost 
+                ? sub.currentMonthCost 
+                : sub.cost / (sub.billing === 'yearly' ? 12 : sub.billing === 'quarterly' ? 3 : 1);
+              
+              return (
+                <div key={sub.id} style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  padding: '8px',
+                  background: idx % 2 === 0 ? '#F9FAFB' : '#FFFFFF',
+                  borderRadius: '4px'
+                }}>
+                  <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                    <span style={{
+                      width: '24px',
+                      height: '24px',
+                      borderRadius: '50%',
+                      background: '#E5E7EB',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      fontSize: '12px',
+                      fontWeight: '600',
+                      color: '#6B7280'
+                    }}>
+                      {idx + 1}
+                    </span>
+                    <div>
+                      <div style={{ fontSize: '14px', fontWeight: '500', color: '#111827' }}>
+                        {sub.service}
+                      </div>
+                      <div style={{ fontSize: '12px', color: '#6B7280' }}>
+                        {sub.company} • {sub.category}
+                      </div>
+                    </div>
+                  </div>
+                  <div style={{ textAlign: 'right' }}>
+                    <div style={{ fontSize: '14px', fontWeight: '600', color: '#111827' }}>
+                      {formatCurrency(monthly)}/mo
+                    </div>
+                    <div style={{ fontSize: '11px', color: '#6B7280' }}>
+                      {sub.billing}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </ChartCard>
+      </div>
+    </div>
+  );
 };
 
-const TableActionButton = ({ onClick, title, children, danger }: any) => (
-  <button
-    onClick={onClick}
-    title={title}
-    style={{
-      padding: '4px',
-      border: 'none',
-      background: 'transparent',
-      borderRadius: '4px',
-      cursor: 'pointer',
-      color: danger ? '#DC2626' : '#6B7280',
-      transition: 'all 0.2s',
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center'
-    }}
-    onMouseEnter={e => {
-      e.currentTarget.style.background = danger ? '#FEE2E2' : '#F3F4F6';
-      e.currentTarget.style.color = danger ? '#B91C1C' : '#4B5563';
-    }}
-    onMouseLeave={e => {
-      e.currentTarget.style.background = 'transparent';
-      e.currentTarget.style.color = danger ? '#DC2626' : '#6B7280';
+const ChartCard = ({ title, children }: any) => (
+  <div style={{
+    background: '#FFFFFF',
+    border: '1px solid #E5E7EB',
+    borderRadius: '8px',
+    padding: '20px'
+  }}>
+    <h3 style={{
+      fontSize: '16px',
+      fontWeight: '600',
+      color: '#111827',
+      marginBottom: '16px'
     }}>
+      {title}
+    </h3>
     {children}
-  </button>
+  </div>
 );
 
-/* =========================
-   Badges
-   ========================= */
+const BudgetModal = ({ budgets, onClose, onSave, COMPANIES, CATEGORIES }: any) => {
+  const [localBudgets, setLocalBudgets] = useState(budgets);
+  const [newBudget, setNewBudget] = useState({
+    company: 'all',
+    category: 'all',
+    monthlyLimit: '',
+    yearlyLimit: '',
+    alertThreshold: '80'
+  });
 
-const StatusBadge = ({ status }: any) => {
-  const getColors = () => {
-    switch (status) {
-      case 'active': return { bg: '#D1FAE5', text: '#065F46' };
-      case 'pending': return { bg: '#FEF3C7', text: '#78350F' };
-      case 'cancelled': return { bg: '#FEE2E2', text: '#991B1B' };
-      default: return { bg: '#F3F4F6', text: '#6B7280' };
-    }
+  const addBudget = () => {
+    if (!newBudget.monthlyLimit) return;
+    
+    const budget = {
+      id: Date.now().toString(),
+      company: newBudget.company,
+      category: newBudget.category,
+      monthlyLimit: parseFloat(newBudget.monthlyLimit),
+      yearlyLimit: parseFloat(newBudget.yearlyLimit || (parseFloat(newBudget.monthlyLimit) * 12).toString()),
+      alertThreshold: parseFloat(newBudget.alertThreshold)
+    };
+    
+    setLocalBudgets([...localBudgets, budget]);
+    setNewBudget({
+      company: 'all',
+      category: 'all',
+      monthlyLimit: '',
+      yearlyLimit: '',
+      alertThreshold: '80'
+    });
   };
-  const colors = getColors();
-  return <span style={badge(colors)}>{status.toUpperCase()}</span>;
+
+  const removeBudget = (id: string) => {
+    setLocalBudgets(localBudgets.filter((b: any) => b.id !== id));
+  };
+
+  return (
+    <div style={backdrop} onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div style={modalBox(600)}>
+        <ModalHeader title="Budget Management" onClose={onClose} />
+        
+        <div style={{ padding: '24px' }}>
+          <div style={{
+            background: '#F3F4F6',
+            borderRadius: '8px',
+            padding: '16px',
+            marginBottom: '24px'
+          }}>
+            <h4 style={{ fontSize: '14px', fontWeight: '600', color: '#374151', marginBottom: '12px' }}>
+              Add New Budget
+            </h4>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: '12px' }}>
+              <select
+                value={newBudget.company}
+                onChange={e => setNewBudget({ ...newBudget, company: e.target.value })}
+                style={inputStyle}
+              >
+                <option value="all">All Companies</option>
+                {COMPANIES.map((c: string) => (
+                  <option key={c} value={c}>{c}</option>
+                ))}
+              </select>
+              <select
+                value={newBudget.category}
+                onChange={e => setNewBudget({ ...newBudget, category: e.target.value })}
+                style={inputStyle}
+              >
+                <option value="all">All Categories</option>
+                {CATEGORIES.map((c: string) => (
+                  <option key={c} value={c}>{c}</option>
+                ))}
+              </select>
+              <input
+                type="number"
+                placeholder="Monthly Limit ($)"
+                value={newBudget.monthlyLimit}
+                onChange={e => setNewBudget({ ...newBudget, monthlyLimit: e.target.value })}
+                style={inputStyle}
+              />
+              <input
+                type="number"
+                placeholder="Alert at (%))"
+                value={newBudget.alertThreshold}
+                onChange={e => setNewBudget({ ...newBudget, alertThreshold: e.target.value })}
+                style={inputStyle}
+              />
+            </div>
+            <button
+              onClick={addBudget}
+              style={{ ...primaryBtn, width: '100%' }}
+            >
+              Add Budget
+            </button>
+          </div>
+
+          <div>
+            <h4 style={{ fontSize: '14px', fontWeight: '600', color: '#374151', marginBottom: '12px' }}>
+              Current Budgets
+            </h4>
+            {localBudgets.length === 0 ? (
+              <p style={{ fontSize: '14px', color: '#6B7280', textAlign: 'center', padding: '24px' }}>
+                No budgets configured
+              </p>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                {localBudgets.map((budget: any) => (
+                  <div
+                    key={budget.id}
+                    style={{
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                      padding: '12px',
+                      border: '1px solid #E5E7EB',
+                      borderRadius: '6px',
+                      background: '#FFFFFF'
+                    }}
+                  >
+                    <div>
+                      <div style={{ fontSize: '14px', fontWeight: '500', color: '#111827' }}>
+                        {budget.company === 'all' ? 'All Companies' : budget.company} • 
+                        {budget.category === 'all' ? ' All Categories' : ` ${budget.category}`}
+                      </div>
+                      <div style={{ fontSize: '12px', color: '#6B7280' }}>
+                        ${budget.monthlyLimit}/mo • Alert at {budget.alertThreshold}%
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => removeBudget(budget.id)}
+                      style={{
+                        padding: '4px 8px',
+                        background: '#FEE2E2',
+                        color: '#DC2626',
+                        border: 'none',
+                        borderRadius: '4px',
+                        fontSize: '12px',
+                        cursor: 'pointer'
+                      }}
+                    >
+                      Remove
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div style={{
+            display: 'flex',
+            gap: '12px',
+            marginTop: '24px',
+            paddingTop: '24px',
+            borderTop: '1px solid #E5E7EB'
+          }}>
+            <button onClick={onClose} style={{ ...outlineBtn, flex: 1 }}>
+              Cancel
+            </button>
+            <button
+              onClick={() => onSave(localBudgets)}
+              style={{ ...primaryBtn, flex: 1 }}
+            >
+              Save Budgets
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 };
 
-const PaymentStatusBadge = ({ status }: any) => {
-  const getColors = () => {
-    switch (status) {
-      case 'paid': return { bg: '#D1FAE5', text: '#065F46' };
-      case 'pending': return { bg: '#FEF3C7', text: '#78350F' };
-      case 'overdue': return { bg: '#FEE2E2', text: '#991B1B' };
-      default: return { bg: '#F3F4F6', text: '#6B7280' };
+const ImportModal = ({ onClose, onImport }: any) => {
+  const [importData, setImportData] = useState('');
+  const [importType, setImportType] = useState<'json' | 'csv'>('csv');
+
+  const handleImport = () => {
+    try {
+      let data;
+      if (importType === 'json') {
+        data = JSON.parse(importData);
+      } else {
+        // Simple CSV parsing
+        const lines = importData.split('\n');
+        const headers = lines[0].split(',').map(h => h.trim());
+        data = lines.slice(1).map(line => {
+          const values = line.split(',').map(v => v.trim());
+          const obj: any = {};
+          headers.forEach((header, idx) => {
+            obj[header] = values[idx];
+          });
+          return obj;
+        });
+      }
+      onImport(Array.isArray(data) ? data : [data]);
+    } catch (error) {
+      alert('Invalid format. Please check your data.');
     }
   };
-  const colors = getColors();
-  return <span style={badge(colors)}>{(status || 'pending').toUpperCase()}</span>;
+
+  return (
+    <div style={backdrop} onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div style={modalBox(600)}>
+        <ModalHeader title="Import Subscriptions" onClose={onClose} />
+        
+        <div style={{ padding: '24px' }}>
+          <div style={{ marginBottom: '16px' }}>
+            <label style={{ fontSize: '14px', fontWeight: '500', color: '#374151' }}>
+              Import Format:
+            </label>
+            <div style={{ display: 'flex', gap: '12px', marginTop: '8px' }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer' }}>
+                <input
+                  type="radio"
+                  value="csv"
+                  checked={importType === 'csv'}
+                  onChange={() => setImportType('csv')}
+                />
+                CSV
+              </label>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer' }}>
+                <input
+                  type="radio"
+                  value="json"
+                  checked={importType === 'json'}
+                  onChange={() => setImportType('json')}
+                />
+                JSON
+              </label>
+            </div>
+          </div>
+
+          <div style={{ marginBottom: '16px' }}>
+            <label style={{ fontSize: '14px', fontWeight: '500', color: '#374151' }}>
+              Paste your data:
+            </label>
+            <textarea
+              value={importData}
+              onChange={e => setImportData(e.target.value)}
+              placeholder={importType === 'csv' 
+                ? 'company,service,cost,billing,category,status\nKisamos,Microsoft 365,299,monthly,Software,active'
+                : '[{"company":"Kisamos","service":"Microsoft 365","cost":299,"billing":"monthly"}]'}
+              style={{
+                width: '100%',
+                minHeight: '200px',
+                padding: '12px',
+                border: '1px solid #E5E7EB',
+                borderRadius: '6px',
+                fontSize: '14px',
+                fontFamily: 'monospace',
+                resize: 'vertical',
+                marginTop: '8px'
+              }}
+            />
+          </div>
+
+          <div style={{
+            background: '#F3F4F6',
+            borderRadius: '6px',
+            padding: '12px',
+            marginBottom: '16px'
+          }}>
+            <p style={{ fontSize: '12px', color: '#6B7280', margin: 0 }}>
+              <strong>Expected fields:</strong> company, service, cost, billing, category, status, manager, tags, notes
+            </p>
+          </div>
+
+          <div style={{ display: 'flex', gap: '12px' }}>
+            <button onClick={onClose} style={{ ...outlineBtn, flex: 1 }}>
+              Cancel
+            </button>
+            <button
+              onClick={handleImport}
+              style={{ ...primaryBtn, flex: 1 }}
+              disabled={!importData}
+            >
+              Import
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 };
 
-/* =========================
-   Form Modal
-   ========================= */
+const DuplicatesModal = ({ duplicates, onClose, onMerge, formatCurrency }: any) => (
+  <div style={backdrop} onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+    <div style={modalBox(700)}>
+      <ModalHeader title="Potential Duplicate Subscriptions" onClose={onClose} />
+      
+      <div style={{ padding: '24px' }}>
+        {duplicates.length === 0 ? (
+          <p style={{ fontSize: '14px', color: '#6B7280', textAlign: 'center', padding: '48px' }}>
+            No potential duplicates found. Your subscriptions look well organized!
+          </p>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+            {duplicates.map((group: any[], idx: number) => (
+              <div
+                key={idx}
+                style={{
+                  border: '1px solid #E5E7EB',
+                  borderRadius: '8px',
+                  padding: '16px',
+                  background: '#FEFCE8'
+                }}
+              >
+                <h4 style={{ fontSize: '14px', fontWeight: '600', color: '#78350F', marginBottom: '12px' }}>
+                  Potential Duplicate Group {idx + 1}
+                </h4>
+                <div style={{ display: 'grid', gap: '8px' }}>
+                  {group.map((sub: any) => (
+                    <div
+                      key={sub.id}
+                      style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        padding: '8px',
+                        background: '#FFFFFF',
+                        borderRadius: '4px',
+                        border: '1px solid #FCD34D'
+                      }}
+                    >
+                      <div>
+                        <div style={{ fontSize: '14px', fontWeight: '500', color: '#111827' }}>
+                          {sub.service}
+                        </div>
+                        <div style={{ fontSize: '12px', color: '#6B7280' }}>
+                          {sub.company} • {sub.category} • {formatCurrency(sub.cost)}/{sub.billing}
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => {
+                          const deleteIds = group.filter(s => s.id !== sub.id).map(s => s.id);
+                          if (confirm(`Keep "${sub.service}" and remove ${deleteIds.length} duplicate(s)?`)) {
+                            onMerge(sub.id, deleteIds);
+                          }
+                        }}
+                        style={{
+                          padding: '4px 8px',
+                          background: '#10B981',
+                          color: '#FFFFFF',
+                          border: 'none',
+                          borderRadius: '4px',
+                          fontSize: '12px',
+                          cursor: 'pointer'
+                        }}
+                      >
+                        Keep This
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  </div>
+);
 
-const FormModal = ({
+const EnhancedFormModal = ({
   editingId, formData, setFormData,
   currentTags, tagInput, setTagInput,
   onSubmit, onClose, onAddTag, onRemoveTag,
@@ -1824,33 +2540,10 @@ const FormModal = ({
 }: any) => (
   <div style={backdrop} onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
     <div style={modalBox(600)}>
-      <div style={{
-        padding: '24px',
-        borderBottom: '1px solid #E5E7EB',
-        display: 'flex',
-        justifyContent: 'space-between',
-        alignItems: 'center'
-      }}>
-        <h2 style={{ fontSize: '20px', fontWeight: '600', color: '#111827', margin: 0 }}>
-          {editingId !== null ? 'Edit Subscription' : 'Add New Subscription'}
-        </h2>
-        <button onClick={onClose} style={{
-          width: '32px',
-          height: '32px',
-          border: 'none',
-          background: '#F3F4F6',
-          borderRadius: '6px',
-          cursor: 'pointer',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          color: '#6B7280'
-        }}>
-          <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
-            <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
-          </svg>
-        </button>
-      </div>
+      <ModalHeader 
+        title={editingId !== null ? 'Edit Subscription' : 'Add New Subscription'} 
+        onClose={onClose} 
+      />
 
       <form onSubmit={onSubmit} style={{ padding: '24px' }}>
         <div style={{ display: 'grid', gap: '16px' }}>
@@ -1904,7 +2597,6 @@ const FormModal = ({
             </FormField>
           </div>
 
-          {/* NEW: Pricing Type */}
           <FormField label="Pricing Type">
             <select
               value={formData.pricingType || 'fixed'}
@@ -1915,6 +2607,31 @@ const FormModal = ({
               <option value="variable">Variable (usage/consumption)</option>
             </select>
           </FormField>
+
+          {/* Seats Management */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+            <FormField label="Total Seats">
+              <input
+                type="number"
+                value={formData.seats || ''}
+                onChange={e => setFormData({ ...formData, seats: parseInt(e.target.value) || 0 })}
+                style={inputStyle}
+                placeholder="0"
+                min="0"
+              />
+            </FormField>
+
+            <FormField label="Seats Used">
+              <input
+                type="number"
+                value={formData.seatsUsed || ''}
+                onChange={e => setFormData({ ...formData, seatsUsed: parseInt(e.target.value) || 0 })}
+                style={inputStyle}
+                placeholder="0"
+                min="0"
+              />
+            </FormField>
+          </div>
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
             <FormField label="Category">
@@ -2011,8 +2728,6 @@ const FormModal = ({
                 type="button"
                 onClick={onAddTag}
                 style={primaryBtn}
-                onMouseEnter={e => e.currentTarget.style.background = '#4338CA'}
-                onMouseLeave={e => e.currentTarget.style.background = '#4F46E5'}
               >
                 Add
               </button>
@@ -2043,9 +2758,7 @@ const FormModal = ({
                         display: 'flex'
                       }}
                     >
-                      <svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor">
-                        <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
-                      </svg>
+                      ×
                     </button>
                   </span>
                 ))}
@@ -2073,25 +2786,13 @@ const FormModal = ({
           <button
             type="button"
             onClick={onClose}
-            style={{
-              flex: 1,
-              padding: '10px',
-              border: '1px solid #E5E7EB',
-              background: '#FFFFFF',
-              color: '#374151',
-              borderRadius: '6px',
-              fontSize: '14px',
-              fontWeight: '500',
-              cursor: 'pointer'
-            }}
+            style={{ ...outlineBtn, flex: 1 }}
           >
             Cancel
           </button>
           <button
             type="submit"
             style={{ ...primaryBtn, flex: 1 }}
-            onMouseEnter={e => e.currentTarget.style.background = '#4338CA'}
-            onMouseLeave={e => e.currentTarget.style.background = '#4F46E5'}
           >
             {editingId !== null ? 'Update Subscription' : 'Add Subscription'}
           </button>
@@ -2101,186 +2802,196 @@ const FormModal = ({
   </div>
 );
 
-/* =========================
-   Documents Modal
-   ========================= */
-
-const DocumentsModal = ({ subscription, onClose, onUpload, onDownload, formatDate, formatFileSize }: any) => (
+const EnhancedHelpModal = ({ onClose }: any) => (
   <div style={backdrop} onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-    <div style={modalBox(600)}>
-      <div style={{
-        padding: '24px',
-        borderBottom: '1px solid #E5E7EB',
-        display: 'flex',
-        justifyContent: 'space-between',
-        alignItems: 'center'
-      }}>
-        <div>
-          <h2 style={{ fontSize: '20px', fontWeight: '600', color: '#111827', margin: '0 0 4px 0' }}>
-            Documents & Files
-          </h2>
-          <p style={{ fontSize: '14px', color: '#6B7280', margin: 0 }}>
-            {subscription.service}
-          </p>
-        </div>
-        <button onClick={onClose} style={{
-          width: '32px',
-          height: '32px',
-          border: 'none',
-          background: '#F3F4F6',
-          borderRadius: '6px',
-          cursor: 'pointer',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          color: '#6B7280'
-        }}>
-          <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
-            <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
-          </svg>
-        </button>
-      </div>
-
-      <div style={{ padding: '24px' }}>
-        <label
-          style={{
-            display: 'block',
-            padding: '32px',
-            border: '2px dashed #E5E7EB',
-            borderRadius: '8px',
-            textAlign: 'center',
-            cursor: 'pointer',
-            marginBottom: '24px',
-            transition: 'all 0.2s',
-            background: '#F9FAFB'
-          } as React.CSSProperties}
-          onMouseEnter={e => {
-            (e.currentTarget.style as any).borderColor = '#4F46E5';
-            e.currentTarget.style.background = '#F5F3FF';
-          }}
-          onMouseLeave={e => {
-            (e.currentTarget.style as any).borderColor = '#E5E7EB';
-            e.currentTarget.style.background = '#F9FAFB';
-          }}
-        >
-          <svg width="48" height="48" viewBox="0 0 20 20" fill="#9CA3AF" style={{ margin: '0 auto 12px' }}>
-            <path fillRule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zM6.293 6.707a1 1 0 010-1.414l3-3a1 1 0 011.414 0l3 3a1 1 0 11-1.414 1.414L11 5.414V13a1 1 0 11-2 0V5.414L7.707 6.707a1 1 0 01-1.414 0z" clipRule="evenodd" />
-          </svg>
-          <div style={{ fontSize: '14px', color: '#374151', marginBottom: '4px' }}>
-            Click to upload or drag and drop
-          </div>
-          <div style={{ fontSize: '12px', color: '#9CA3AF' }}>
-            PDF, DOC, DOCX, JPG, PNG up to 10MB
-          </div>
-          <input
-            type="file"
-            style={{ display: 'none' }}
-            onChange={onUpload}
-            accept=".pdf,.doc,.docx,.jpg,.jpeg,.png"
+    <div style={modalBox(800)}>
+      <ModalHeader title="Help & Documentation" onClose={onClose} />
+      <div style={{ padding: '24px', maxHeight: '60vh', overflow: 'auto' }}>
+        <div style={{ display: 'grid', gap: '24px' }}>
+          <HelpSection
+            title="🎯 Key Features"
+            content={[
+              "Track subscriptions across multiple companies and categories",
+              "Monitor variable/consumption-based costs (Azure, AWS, etc.)",
+              "Set budgets and receive alerts when approaching limits",
+              "Detect potential duplicate subscriptions automatically",
+              "Track seat utilization and identify underused subscriptions",
+              "Forecast future costs based on historical data",
+              "Bulk operations for efficient management",
+              "Import/export data in JSON or CSV format"
+            ]}
           />
-        </label>
-
-        {subscription.attachments && subscription.attachments.length > 0 ? (
-          <div style={{ display: 'grid', gap: '12px' }}>
-            {subscription.attachments.map((file: FileAttachment) => (
-              <div key={file.id} style={{
-                display: 'flex',
-                alignItems: 'center',
-                padding: '12px',
-                border: '1px solid #E5E7EB',
-                borderRadius: '8px',
-                gap: '12px',
-                background: '#FFFFFF'
-              }}>
-                <div style={{
-                  width: '40px',
-                  height: '40px',
-                  background: file.type === 'contract' ? '#EDE9FE' : file.type === 'invoice' ? '#DBEAFE' : '#F3F4F6',
-                  borderRadius: '6px',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center'
-                }}>
-                  <svg width="20" height="20" viewBox="0 0 20 20" fill={file.type === 'contract' ? '#7C3AED' : file.type === 'invoice' ? '#2563EB' : '#6B7280'}>
-                    <path fillRule="evenodd" d="M4 4a2 2 0 00-2 2v8a2 2 0 002 2h12a2 2 0 002-2V6a2 2 0 00-2-2h-5L9 2H4z" clipRule="evenodd" />
-                  </svg>
-                </div>
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontSize: '14px', fontWeight: '500', color: '#111827', marginBottom: '2px' }}>
-                    {file.name}
-                  </div>
-                  <div style={{ fontSize: '12px', color: '#6B7280' }}>
-                    {formatFileSize(file.size)} • {formatDate(file.uploadDate)}
-                  </div>
-                </div>
-                <button
-                  onClick={() => onDownload(file)}
-                  style={{
-                    padding: '6px',
-                    border: 'none',
-                    background: '#F3F4F6',
-                    borderRadius: '6px',
-                    cursor: 'pointer',
-                    color: '#6B7280',
-                    transition: 'all 0.2s'
-                  }}
-                  onMouseEnter={e => {
-                    e.currentTarget.style.background = '#E5E7EB';
-                    e.currentTarget.style.color = '#4B5563';
-                  }}
-                  onMouseLeave={e => {
-                    e.currentTarget.style.background = '#F3F4F6';
-                    e.currentTarget.style.color = '#6B7280';
-                  }}
-                >
-                  <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor">
-                    <path fillRule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z" clipRule="evenodd" />
-                  </svg>
-                </button>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <div style={{
-            textAlign: 'center',
-            padding: '24px',
-            color: '#9CA3AF',
-            fontSize: '14px'
-          }}>
-            No documents uploaded yet
-          </div>
-        )}
+          
+          <HelpSection
+            title="💡 Health Score Explained"
+            content={[
+              "100-70: Good - Subscription is well-managed",
+              "69-40: Warning - Needs attention",
+              "Below 40: Critical - Immediate action required",
+              "Factors: Payment status, seat utilization, contract expiry, cost volatility"
+            ]}
+          />
+          
+          <HelpSection
+            title="⚡ Keyboard Shortcuts"
+            content={[
+              "Ctrl+N: Quick add subscription",
+              "Ctrl+S: Save current form",
+              "Ctrl+F: Focus search field",
+              "Esc: Close modals"
+            ]}
+          />
+          
+          <HelpSection
+            title="📊 Analytics View"
+            content={[
+              "View spending breakdown by category and company",
+              "Track cost trends over time",
+              "Identify top expenses",
+              "Forecast future spending",
+              "Export reports for stakeholders"
+            ]}
+          />
+        </div>
       </div>
     </div>
   </div>
 );
 
-/* =========================
-   Form Field & Input Style
-   ========================= */
-
-const FormField = ({ label, children }: any) => (
+const HelpSection = ({ title, content }: any) => (
   <div>
-    <label style={{
-      display: 'block',
-      fontSize: '14px',
-      fontWeight: '500',
-      color: '#374151',
-      marginBottom: '6px'
-    }}>
-      {label}
-    </label>
-    {children}
+    <h3 style={{ fontSize: '16px', fontWeight: '600', color: '#111827', marginBottom: '12px' }}>
+      {title}
+    </h3>
+    <ul style={{ margin: 0, paddingLeft: '24px' }}>
+      {content.map((item: string, idx: number) => (
+        <li key={idx} style={{ fontSize: '14px', color: '#6B7280', marginBottom: '6px' }}>
+          {item}
+        </li>
+      ))}
+    </ul>
   </div>
 );
 
-const inputStyle: React.CSSProperties = {
-  width: '100%',
-  padding: '8px 12px',
-  border: '1px solid #E5E7EB',
-  borderRadius: '6px',
-  fontSize: '14px',
-  outline: 'none',
-  transition: 'border-color 0.2s',
-  background: '#FFFFFF'
+/* =========================
+   Small UI Components
+   ========================= */
+
+const Spinner = () => (
+  <>
+    <div style={{
+      width: '40px',
+      height: '40px',
+      border: '3px solid #E5E7EB',
+      borderTop: '3px solid #4F46E5',
+      borderRadius: '50%',
+      animation: 'spin 1s linear infinite',
+      margin: '0 auto 16px'
+    }} />
+    <style jsx>{`
+      @keyframes spin {
+        0% { transform: rotate(0deg); }
+        100% { transform: rotate(360deg); }
+      }
+    `}</style>
+  </>
+);
+
+const Alert = ({ title, children, bg, border, iconColor, textColor }: any) => (
+  <div style={{
+    padding: '16px',
+    background: bg,
+    border: `1px solid ${border}`,
+    borderRadius: '8px',
+    display: 'flex',
+    gap: '12px',
+    alignItems: 'flex-start'
+  }}>
+    <svg width="20" height="20" viewBox="0 0 20 20" fill={iconColor}>
+      <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+    </svg>
+    <div style={{ flex: 1 }}>
+      <div style={{ fontWeight: '600', color: textColor, marginBottom: '4px' }}>
+        {title}
+      </div>
+      <div style={{ fontSize: '14px', color: textColor }}>
+        {children}
+      </div>
+    </div>
+  </div>
+);
+
+const HealthIndicator = ({ score }: any) => {
+  const getColor = () => {
+    if (score >= 70) return '#10B981';
+    if (score >= 40) return '#F59E0B';
+    return '#EF4444';
+  };
+  
+  return (
+    <div style={{
+      display: 'flex',
+      alignItems: 'center',
+      gap: '6px'
+    }}>
+      <div style={{
+        width: '24px',
+        height: '24px',
+        borderRadius: '50%',
+        border: `2px solid ${getColor()}`,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        fontSize: '10px',
+        fontWeight: 'bold',
+        color: getColor()
+      }}>
+        {score}
+      </div>
+      <span style={{ fontSize: '12px', color: '#6B7280' }}>
+        {score >= 70 ? 'Good' : score >= 40 ? 'Warning' : 'Critical'}
+      </span>
+    </div>
+  );
 };
+
+const UsageIndicator = ({ used, total }: any) => {
+  const percentage = (used / total) * 100;
+  const color = percentage > 90 ? '#F59E0B' : percentage < 30 ? '#EF4444' : '#10B981';
+  
+  return (
+    <div>
+      <div style={{ fontSize: '12px', color: '#6B7280', marginBottom: '2px' }}>
+        {used}/{total} ({percentage.toFixed(0)}%)
+      </div>
+      <div style={{
+        height: '4px',
+        background: '#E5E7EB',
+        borderRadius: '2px',
+        overflow: 'hidden',
+        width: '80px'
+      }}>
+        <div style={{
+          width: `${Math.min(100, percentage)}%`,
+          height: '100%',
+          background: color,
+          transition: 'width 0.3s'
+        }} />
+      </div>
+    </div>
+  );
+};
+
+/* =========================
+   Icons
+   ========================= */
+
+const IconSearch = (props: any) => (
+  <svg {...props} width="16" height="16" viewBox="0 0 20 20" fill="#9CA3AF">
+    <path fillRule="evenodd" d="M8 4a4 4 0 100 8 4 4 0 000-8zM2 8a6 6 0 1110.89 3.476l4.817 4.817a1 1 0 01-1.414 1.414l-4.816-4.816A6 6 0 012 8z" clipRule="evenodd" />
+  </svg>
+);
+
+const IconMoney = () => (
+  <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
+    <path d="M8.433 7.418c.155-.103.346-.196.567-.267v1.698a2.305 2.305 0 01-.567-.267C8.07 8.34 8 8.114 8 8c0-.
