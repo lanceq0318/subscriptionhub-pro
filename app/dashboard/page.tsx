@@ -35,9 +35,11 @@ type Payment = {
   reference?: string;
 };
 
+type CostPoint = { period: string; amount: number };
+
 type Subscription = {
   id: number;
-  company: 'Kisamos' | 'Mizzen' | 'Fertmax';
+  company: 'Kisamos' | 'Mizzen' | 'Fertmax' | 'Shantaram' | 'Relia Ship';
   service: string;
   cost: number;
   billing: 'monthly' | 'yearly' | 'quarterly';
@@ -53,17 +55,27 @@ type Subscription = {
   attachments?: FileAttachment[];
   payments?: Payment[];
   lastPaymentStatus?: 'paid' | 'pending' | 'overdue';
+
+  /** variable-cost related (returned by GET aggregator) */
+  pricingType?: 'fixed' | 'variable';
+  currentMonthCost?: number | null;
+  lastMonthCost?: number | null;
+  costHistory?: CostPoint[];
+
   /** returned by GET aggregator */
   attachment_count?: number;
 };
 
-type SubscriptionForm = Omit<Subscription, 'id' | 'cost' | 'attachment_count'> & { cost: string };
+type SubscriptionForm = Omit<
+  Subscription,
+  'id' | 'cost' | 'attachment_count' | 'currentMonthCost' | 'lastMonthCost' | 'costHistory'
+> & { cost: string };
 
 /* =========================
    Constants
    ========================= */
 
-const COMPANIES = ['Kisamos', 'Mizzen', 'Fertmax'] as const;
+const COMPANIES = ['Kisamos', 'Mizzen', 'Fertmax', 'Shantaram', 'Relia Ship'] as const;
 
 const CATEGORIES = [
   'Software',
@@ -135,17 +147,36 @@ export default function Dashboard() {
     attachments: [],
     payments: [],
     lastPaymentStatus: 'pending',
+    pricingType: 'fixed', // NEW
   });
 
-  // ----- Derived values (useMemo BEFORE any conditional returns) -----
+  // ----- Helpers for cost logic -----
+  const normalizeToMonthly = (cost: number, billing: Subscription['billing']) => {
+    if (billing === 'yearly') return cost / 12;
+    if (billing === 'quarterly') return cost / 3;
+    return cost;
+  };
+
+  const effectiveMonthly = (sub: Subscription) => {
+    if (sub.pricingType === 'variable' && typeof sub.currentMonthCost === 'number') {
+      return sub.currentMonthCost;
+    }
+    return normalizeToMonthly(sub.cost, sub.billing);
+  };
+
+  const effectiveChargeForPayment = (sub: Subscription) => {
+    // What to record in a Payment row when you click "Mark Paid"
+    if (sub.pricingType === 'variable' && typeof sub.currentMonthCost === 'number') {
+      return sub.currentMonthCost;
+    }
+    // For fixed plans use full period cost (not normalized)
+    return sub.cost;
+  };
+
+  // ----- Derived values -----
   const stats = useMemo(() => {
     const active = subscriptions.filter(s => s.status === 'active');
-    const monthly = active.reduce((total, sub) => {
-      let cost = sub.cost;
-      if (sub.billing === 'yearly') cost = sub.cost / 12;
-      if (sub.billing === 'quarterly') cost = sub.cost / 3;
-      return total + cost;
-    }, 0);
+    const monthly = active.reduce((total, sub) => total + effectiveMonthly(sub), 0);
 
     const vendors = new Set(subscriptions.map(s => s.service)).size;
     const paidCount = subscriptions.filter(s => s.lastPaymentStatus === 'paid').length;
@@ -201,14 +232,12 @@ export default function Dashboard() {
   }, [subscriptions, companyFilter, categoryFilter, paymentFilter, searchTerm]);
 
   // ----- Effects -----
-  // Redirect if unauthenticated
   useEffect(() => {
     if (status === 'unauthenticated') {
       router.push('/login');
     }
   }, [status, router]);
 
-  // Load data only when authenticated
   useEffect(() => {
     async function loadSubscriptions() {
       if (status !== 'authenticated') return;
@@ -226,7 +255,7 @@ export default function Dashboard() {
     loadSubscriptions();
   }, [status]);
 
-  // ----- Conditional returns AFTER all hooks/useMemo -----
+  // ----- Conditional returns AFTER hooks/useMemo -----
   if (status === 'loading') {
     return (
       <div style={fullHeightCenter('#F9FAFB')}>
@@ -307,9 +336,11 @@ export default function Dashboard() {
       const subscription = subscriptions.find(s => s.id === subscriptionId);
       if (!subscription) return;
 
+      const paymentAmount = effectiveChargeForPayment(subscription);
+
       const payment: Payment = {
         date: new Date().toISOString(),
-        amount: subscription.cost,
+        amount: paymentAmount,
         status: 'paid',
         method: subscription.paymentMethod,
         reference: `PAY-${Date.now()}`,
@@ -323,6 +354,34 @@ export default function Dashboard() {
     } catch (error) {
       console.error('Error marking as paid:', error);
       alert('Failed to update payment status');
+    }
+  };
+
+  const logActualCost = async (subscriptionId: number) => {
+    try {
+      const now = new Date();
+      const y = now.getFullYear();
+      const m = String(now.getMonth() + 1).padStart(2, '0');
+      const period = `${y}-${m}-01`;
+
+      const input = prompt(
+        `Enter actual cost for ${now.toLocaleString('default', { month: 'long', year: 'numeric' })}:`,
+        ''
+      );
+      if (!input) return;
+      const amount = parseFloat(input);
+      if (!isFinite(amount)) {
+        alert('Please enter a valid number.');
+        return;
+      }
+
+      await api.upsertSubscriptionCost(subscriptionId, { period, amount, source: 'manual' });
+
+      const data = await api.getSubscriptions();
+      setSubscriptions(data);
+    } catch (err) {
+      console.error('logActualCost error', err);
+      alert('Failed to log cost');
     }
   };
 
@@ -392,6 +451,7 @@ export default function Dashboard() {
       attachments: [],
       payments: [],
       lastPaymentStatus: 'pending',
+      pricingType: 'fixed',
     });
     setCurrentTags([]);
     setTagInput('');
@@ -401,7 +461,11 @@ export default function Dashboard() {
 
   const handleEdit = (sub: Subscription) => {
     const { id: _id, cost: _ignore, attachment_count: _ac, ...rest } = sub;
-    setFormData({ ...rest, cost: sub.cost.toString() });
+    setFormData({
+      ...rest,
+      cost: sub.cost.toString(),
+      pricingType: sub.pricingType || 'fixed',
+    });
     setCurrentTags(sub.tags || []);
     setEditingId(sub.id);
     setShowModal(true);
@@ -458,6 +522,8 @@ export default function Dashboard() {
       case 'Kisamos': return '#4F46E5';
       case 'Mizzen': return '#059669';
       case 'Fertmax': return '#7C3AED';
+      case 'Shantaram': return '#F59E0B';
+      case 'Relia Ship': return '#0EA5E9';
       default: return '#6B7280';
     }
   };
@@ -684,12 +750,12 @@ export default function Dashboard() {
                     style={{
                       width: '100%',
                       padding: '8px 12px 8px 36px',
-                      border: '1px solid #E5E7EB',
+                      border: '1px solid '#E5E7EB',
                       borderRadius: '6px',
                       fontSize: '14px',
                       outline: 'none',
                       transition: 'border-color 0.2s'
-                    }}
+                    } as React.CSSProperties}
                     onFocus={e => e.currentTarget.style.borderColor = '#4F46E5'}
                     onBlur={e => e.currentTarget.style.borderColor = '#E5E7EB'}
                   />
@@ -793,10 +859,14 @@ export default function Dashboard() {
                       setShowDocumentsModal(true);
                     }}
                     onMarkPaid={() => markAsPaid(sub.id)}
+                    onLogCost={() => logActualCost(sub.id)}
                     onUpload={(e: ChangeEvent<HTMLInputElement>) => handleFileUpload(e, sub.id)}
                     formatCurrency={formatCurrency}
                     formatDate={formatDate}
                     getCompanyColor={getCompanyColor}
+                    displayAmount={sub.pricingType === 'variable' && typeof sub.currentMonthCost === 'number'
+                      ? sub.currentMonthCost
+                      : sub.cost}
                   />
                 ))}
               </div>
@@ -806,6 +876,7 @@ export default function Dashboard() {
                 onEdit={handleEdit}
                 onDelete={handleDelete}
                 onMarkPaid={markAsPaid}
+                onLogCost={logActualCost}
                 onUpload={handleFileUpload}
                 onViewDocuments={(sub: Subscription) => {
                   setSelectedSubscription(sub);
@@ -889,7 +960,7 @@ export default function Dashboard() {
                   </h3>
                   <p style={{ fontSize: '14px', color: '#6D28D9', margin: 0 }}>
                     Track subscriptions that change monthly due to seat count, tiers, or consumption.
-                    Store payment history, compute averages, and highlight cost spikes.
+                    Store actuals by month, compute averages, and highlight cost spikes.
                   </p>
                 </div>
               </div>
@@ -1290,10 +1361,12 @@ const SubscriptionCard = ({
   onDelete,
   onViewDocuments,
   onMarkPaid,
+  onLogCost,
   onUpload,
   formatCurrency,
   formatDate,
-  getCompanyColor
+  getCompanyColor,
+  displayAmount
 }: any) => {
   const getStatusColor = (status: string) => {
     switch (status) {
@@ -1367,10 +1440,10 @@ const SubscriptionCard = ({
         </div>
       </div>
 
-      {/* Cost */}
+      {/* Cost (shows actual for variable when available) */}
       <div style={{ marginBottom: '16px' }}>
         <div style={{ fontSize: '24px', fontWeight: '700', color: '#111827' }}>
-          {formatCurrency(sub.cost)}
+          {formatCurrency(displayAmount)}
           <span style={{ fontSize: '14px', color: '#6B7280', fontWeight: '400' }}>
             /{sub.billing === 'monthly' ? 'mo' : sub.billing === 'yearly' ? 'yr' : 'qtr'}
           </span>
@@ -1409,6 +1482,13 @@ const SubscriptionCard = ({
             Mark Paid
           </ActionButton>
         )}
+
+        <ActionButton onClick={onLogCost}>
+          <svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor">
+            <path d="M4 3a1 1 0 000 2h12a1 1 0 100-2H4zM3 8a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm1 4a1 1 0 000 2h12a1 1 0 100-2H4zm-1 5a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1z" />
+          </svg>
+          Log Cost
+        </ActionButton>
 
         <label style={uploadBtn}
           onMouseEnter={e => {
@@ -1525,7 +1605,18 @@ const ActionButton = ({ onClick, children, primary, success, danger }: any) => {
    Table View & Helpers
    ========================= */
 
-const TableView = ({ subscriptions, onEdit, onDelete, onMarkPaid, onUpload, onViewDocuments, formatCurrency, formatDate, getCompanyColor }: any) => (
+const TableView = ({
+  subscriptions,
+  onEdit,
+  onDelete,
+  onMarkPaid,
+  onLogCost,
+  onUpload,
+  onViewDocuments,
+  formatCurrency,
+  formatDate,
+  getCompanyColor
+}: any) => (
   <div style={{
     background: '#FFFFFF',
     border: '1px solid #E5E7EB',
@@ -1547,87 +1638,99 @@ const TableView = ({ subscriptions, onEdit, onDelete, onMarkPaid, onUpload, onVi
           </tr>
         </thead>
         <tbody>
-          {subscriptions.map((sub: any, idx: number) => (
-            <tr
-              key={sub.id}
-              style={{
-                borderBottom: idx !== subscriptions.length - 1 ? '1px solid #E5E7EB' : 'none',
-                transition: 'background 0.2s'
-              }}
-              onMouseEnter={e => e.currentTarget.style.background = '#F9FAFB'}
-              onMouseLeave={e => e.currentTarget.style.background = '#FFFFFF'}
-            >
-              <td style={td}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  <div style={{
-                    width: '6px',
-                    height: '6px',
-                    borderRadius: '50%',
-                    background: getCompanyColor(sub.company)
-                  }} />
-                  <span style={{ fontSize: '14px', color: '#111827' }}>{sub.company}</span>
-                </div>
-              </td>
-              <td style={td}>
-                <div>
-                  <div style={{ fontSize: '14px', color: '#111827', marginBottom: '4px' }}>{sub.service}</div>
-                  {sub.tags && sub.tags.length > 0 && (
-                    <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
-                      {sub.tags.map((tag: string) => (
-                        <span key={tag} style={tagPill}>{tag}</span>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              </td>
-              <td style={td}>
-                <div style={{ fontSize: '14px', fontWeight: '600', color: '#111827' }}>
-                  {formatCurrency(sub.cost)}
-                  <span style={{ fontSize: '12px', color: '#6B7280', fontWeight: '400' }}>
-                    /{sub.billing === 'monthly' ? 'mo' : sub.billing === 'yearly' ? 'yr' : 'qtr'}
-                  </span>
-                </div>
-              </td>
-              <td style={td}>
-                <StatusBadge status={sub.status} />
-              </td>
-              <td style={td}>
-                <PaymentStatusBadge status={sub.lastPaymentStatus} />
-              </td>
-              <td style={{ ...td, fontSize: '14px', color: '#6B7280' }}>
-                {formatDate(sub.nextBilling)}
-              </td>
-              <td style={{ ...td, fontSize: '14px', color: '#6B7280' }}>
-                {sub.manager || '-'}
-              </td>
-              <td style={td}>
-                <div style={{ display: 'flex', gap: '4px', justifyContent: 'flex-end' }}>
-                  <TableActionButton onClick={() => onEdit(sub)} title="Edit">
-                    <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor">
-                      <path d="M13.586 3.586a2 2 0 112.828 2.828l-.793.793-2.828-2.828.793-.793zM11.379 5.793L3 14.172V17h2.828l8.38-8.379-2.83-2.828z" />
-                    </svg>
-                  </TableActionButton>
-                  <TableActionButton onClick={() => onViewDocuments(sub)} title="Documents">
-                    <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor">
-                      <path fillRule="evenodd" d="M4 4a2 2 0 00-2 2v8a2 2 0 002 2h12a2 2 0 002-2V6a2 2 0 00-2-2h-5L9 2H4z" clipRule="evenodd" />
-                    </svg>
-                  </TableActionButton>
-                  {sub.lastPaymentStatus !== 'paid' && (
-                    <TableActionButton onClick={() => onMarkPaid(sub.id)} title="Mark as Paid">
+          {subscriptions.map((sub: Subscription, idx: number) => {
+            const displayAmount =
+              sub.pricingType === 'variable' && typeof sub.currentMonthCost === 'number'
+                ? sub.currentMonthCost
+                : sub.cost;
+
+            return (
+              <tr
+                key={sub.id}
+                style={{
+                  borderBottom: idx !== subscriptions.length - 1 ? '1px solid #E5E7EB' : 'none',
+                  transition: 'background 0.2s'
+                }}
+                onMouseEnter={e => e.currentTarget.style.background = '#F9FAFB'}
+                onMouseLeave={e => e.currentTarget.style.background = '#FFFFFF'}
+              >
+                <td style={td}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <div style={{
+                      width: '6px',
+                      height: '6px',
+                      borderRadius: '50%',
+                      background: getCompanyColor(sub.company)
+                    }} />
+                    <span style={{ fontSize: '14px', color: '#111827' }}>{sub.company}</span>
+                  </div>
+                </td>
+                <td style={td}>
+                  <div>
+                    <div style={{ fontSize: '14px', color: '#111827', marginBottom: '4px' }}>{sub.service}</div>
+                    {sub.tags && sub.tags.length > 0 && (
+                      <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
+                        {sub.tags.map((tag: string) => (
+                          <span key={tag} style={tagPill}>{tag}</span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </td>
+                <td style={td}>
+                  <div style={{ fontSize: '14px', fontWeight: '600', color: '#111827' }}>
+                    {formatCurrency(displayAmount)}
+                    <span style={{ fontSize: '12px', color: '#6B7280', fontWeight: '400' }}>
+                      /{sub.billing === 'monthly' ? 'mo' : sub.billing === 'yearly' ? 'yr' : 'qtr'}
+                    </span>
+                  </div>
+                </td>
+                <td style={td}>
+                  <StatusBadge status={sub.status} />
+                </td>
+                <td style={td}>
+                  <PaymentStatusBadge status={sub.lastPaymentStatus} />
+                </td>
+                <td style={{ ...td, fontSize: '14px', color: '#6B7280' }}>
+                  {formatDate(sub.nextBilling)}
+                </td>
+                <td style={{ ...td, fontSize: '14px', color: '#6B7280' }}>
+                  {sub.manager || '-'}
+                </td>
+                <td style={td}>
+                  <div style={{ display: 'flex', gap: '4px', justifyContent: 'flex-end' }}>
+                    <TableActionButton onClick={() => onEdit(sub)} title="Edit">
                       <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor">
-                        <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                        <path d="M13.586 3.586a2 2 0 112.828 2.828l-.793.793-2.828-2.828.793-.793zM11.379 5.793L3 14.172V17h2.828l8.38-8.379-2.83-2.828z" />
                       </svg>
                     </TableActionButton>
-                  )}
-                  <TableActionButton onClick={() => onDelete(sub.id)} title="Delete" danger>
-                    <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor">
-                      <path fillRule="evenodd" d="M9 2a1 1 0 00-1 1v1H6a2 2 0 00-2 2v10a2 2 0 002 2h8a2 2 0 002-2V6a2 2 0 00-2-2h-2V3a1 1 0 00-1-1H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z" clipRule="evenodd" />
-                    </svg>
-                  </TableActionButton>
-                </div>
-              </td>
-            </tr>
-          ))}
+                    <TableActionButton onClick={() => onViewDocuments(sub)} title="Documents">
+                      <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor">
+                        <path fillRule="evenodd" d="M4 4a2 2 0 00-2 2v8a2 2 0 002 2h12a2 2 0 002-2V6a2 2 0 00-2-2h-5L9 2H4z" clipRule="evenodd" />
+                      </svg>
+                    </TableActionButton>
+                    <TableActionButton onClick={() => onLogCost(sub.id)} title="Log Cost">
+                      <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor">
+                        <path d="M4 3a1 1 0 000 2h12a1 1 0 100-2H4zM3 8a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm1 4a1 1 0 000 2h12a1 1 0 100-2H4zm-1 5a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1z" />
+                      </svg>
+                    </TableActionButton>
+                    {sub.lastPaymentStatus !== 'paid' && (
+                      <TableActionButton onClick={() => onMarkPaid(sub.id)} title="Mark as Paid">
+                        <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor">
+                          <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                        </svg>
+                      </TableActionButton>
+                    )}
+                    <TableActionButton onClick={() => onDelete(sub.id)} title="Delete" danger>
+                      <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor">
+                        <path fillRule="evenodd" d="M9 2a1 1 0 00-1 1v1H6a2 2 0 00-2 2v10a2 2 0 002 2h8a2 2 0 002-2V6a2 2 0 00-2-2h-2V3a1 1 0 00-1-1H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z" clipRule="evenodd" />
+                      </svg>
+                    </TableActionButton>
+                  </div>
+                </td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>
@@ -1769,7 +1872,7 @@ const FormModal = ({
               value={formData.service}
               onChange={e => setFormData({ ...formData, service: e.target.value })}
               style={inputStyle}
-              placeholder="e.g., Microsoft 365, AWS, Salesforce"
+              placeholder="e.g., Microsoft 365, Azure, Salesforce"
               required
             />
           </FormField>
@@ -1799,6 +1902,18 @@ const FormModal = ({
               </select>
             </FormField>
           </div>
+
+          {/* NEW: Pricing Type */}
+          <FormField label="Pricing Type">
+            <select
+              value={formData.pricingType || 'fixed'}
+              onChange={e => setFormData({ ...formData, pricingType: e.target.value as 'fixed' | 'variable' })}
+              style={inputStyle}
+            >
+              <option value="fixed">Fixed</option>
+              <option value="variable">Variable (usage/consumption)</option>
+            </select>
+          </FormField>
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
             <FormField label="Category">

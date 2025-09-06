@@ -1,3 +1,4 @@
+// app/api/subscriptions/[id]/route.ts
 import { sql } from '@vercel/postgres';
 import { NextResponse } from 'next/server';
 
@@ -27,6 +28,7 @@ export async function PUT(
       notes,
       tags,
       lastPaymentStatus,
+      pricingType, // new
     } = body as {
       company?: string;
       service?: string;
@@ -42,6 +44,7 @@ export async function PUT(
       notes?: string | null;
       tags?: string[];
       lastPaymentStatus?: 'paid' | 'pending' | 'overdue';
+      pricingType?: 'fixed' | 'variable';
     };
 
     await sql`
@@ -60,6 +63,7 @@ export async function PUT(
         payment_method = ${paymentMethod || null},
         notes = ${notes || null},
         last_payment_status = ${lastPaymentStatus || 'pending'},
+        pricing_type = ${pricingType || 'fixed'},
         updated_at = NOW()
       WHERE id = ${id}
     `;
@@ -91,10 +95,10 @@ export async function DELETE(
       return NextResponse.json({ error: 'Invalid id' }, { status: 400 });
     }
 
-    // Safe manual cascade
     await sql`DELETE FROM payments WHERE subscription_id = ${id}`;
     await sql`DELETE FROM attachments WHERE subscription_id = ${id}`;
     await sql`DELETE FROM subscription_tags WHERE subscription_id = ${id}`;
+    await sql`DELETE FROM subscription_costs WHERE subscription_id = ${id}`;
     await sql`DELETE FROM subscriptions WHERE id = ${id}`;
 
     return NextResponse.json({ success: true });
