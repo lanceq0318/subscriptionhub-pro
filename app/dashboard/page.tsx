@@ -375,7 +375,8 @@ export default function Dashboard() {
         return;
       }
 
-      await api.upsertSubscriptionCost(subscriptionId, { period, amount, source: 'manual' });
+      // Cast to any to avoid type errors if your api typings aren't updated yet
+      await (api as any).upsertSubscriptionCost(subscriptionId, { period, amount, source: 'manual' });
 
       const data = await api.getSubscriptions();
       setSubscriptions(data);
@@ -750,7 +751,7 @@ export default function Dashboard() {
                     style={{
                       width: '100%',
                       padding: '8px 12px 8px 36px',
-                      border: '1px solid '#E5E7EB',
+                      border: '1px solid #E5E7EB',
                       borderRadius: '6px',
                       fontSize: '14px',
                       outline: 'none',
