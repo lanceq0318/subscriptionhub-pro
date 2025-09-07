@@ -1,5 +1,6 @@
 'use client';
 
+import type React from 'react';
 import { useSession, signOut } from 'next-auth/react';
 import { useRouter } from 'next/navigation';
 import { api } from '@/app/lib/api';
@@ -21,7 +22,7 @@ type FileAttachment = {
   type: 'contract' | 'invoice' | 'other';
   size: number;
   uploadDate: string;
-  data: string;        // data URL (base64)
+  data: string;
   mimeType: string;
 };
 
@@ -33,6 +34,8 @@ type Payment = {
   invoiceId?: string;
   method?: string;
   reference?: string;
+  invoiceNumber?: string;
+  notes?: string;
 };
 
 type CostPoint = { period: string; amount: number };
@@ -55,21 +58,34 @@ type Subscription = {
   attachments?: FileAttachment[];
   payments?: Payment[];
   lastPaymentStatus?: 'paid' | 'pending' | 'overdue';
-
-  /** variable-cost related (returned by GET aggregator) */
   pricingType?: 'fixed' | 'variable';
   currentMonthCost?: number | null;
   lastMonthCost?: number | null;
   costHistory?: CostPoint[];
-
-  /** returned by GET aggregator */
   attachment_count?: number;
+  department?: string;
+  costCenter?: string;
+  vendor?: string;
+  accountNumber?: string;
+  autoRenew?: boolean;
+  budget?: number;
 };
 
 type SubscriptionForm = Omit<
   Subscription,
-  'id' | 'cost' | 'attachment_count' | 'currentMonthCost' | 'lastMonthCost' | 'costHistory'
-> & { cost: string };
+  'id' | 'cost' | 'budget' | 'attachment_count' | 'currentMonthCost' | 'lastMonthCost' | 'costHistory'
+> & { cost: string; budget: string };
+
+type FinancialReport = {
+  period: string;
+  totalSpend: number;
+  byCompany: { company: string; amount: number }[];
+  byCategory: { category: string; amount: number }[];
+  byDepartment: { department: string; amount: number }[];
+  savings: number;
+  projectedSpend: number;
+  budgetUtilization: number;
+};
 
 /* =========================
    Constants
@@ -87,7 +103,22 @@ const CATEGORIES = [
   'Communication',
   'HR',
   'Legal',
+  'Finance',
+  'Operations',
   'Other',
+] as const;
+
+const DEPARTMENTS = [
+  'Engineering',
+  'Sales',
+  'Marketing',
+  'Finance',
+  'HR',
+  'Operations',
+  'Legal',
+  'Executive',
+  'Customer Success',
+  'Product',
 ] as const;
 
 const PAYMENT_METHODS = [
@@ -97,6 +128,7 @@ const PAYMENT_METHODS = [
   'PayPal',
   'ACH Transfer',
   'Wire Transfer',
+  'Check',
   'Other',
 ] as const;
 
@@ -107,7 +139,6 @@ type Company = (typeof COMPANIES)[number];
    ========================= */
 
 export default function Dashboard() {
-  // ----- All hooks at top (prevents React error #310) -----
   const router = useRouter();
   const { data: session, status } = useSession();
 
@@ -118,14 +149,17 @@ export default function Dashboard() {
   const [showModal, setShowModal] = useState(false);
   const [showDocumentsModal, setShowDocumentsModal] = useState(false);
   const [showHelpModal, setShowHelpModal] = useState(false);
+  const [showPaymentHistoryModal, setShowPaymentHistoryModal] = useState(false);
+  const [showFinancialReportModal, setShowFinancialReportModal] = useState(false);
   const [selectedSubscription, setSelectedSubscription] = useState<Subscription | null>(null);
   const [editingId, setEditingId] = useState<number | null>(null);
 
   const [searchTerm, setSearchTerm] = useState('');
   const [companyFilter, setCompanyFilter] = useState<'all' | Company>('all');
   const [categoryFilter, setCategoryFilter] = useState('all');
+  const [departmentFilter, setDepartmentFilter] = useState('all');
   const [paymentFilter, setPaymentFilter] = useState<'all' | 'paid' | 'pending' | 'overdue'>('all');
-  const [viewMode, setViewMode] = useState<'grid' | 'table' | 'analytics'>('grid');
+  const [viewMode, setViewMode] = useState<'grid' | 'table' | 'analytics' | 'reports'>('grid');
 
   const [currentTags, setCurrentTags] = useState<string[]>([]);
   const [tagInput, setTagInput] = useState('');
@@ -147,10 +181,27 @@ export default function Dashboard() {
     attachments: [],
     payments: [],
     lastPaymentStatus: 'pending',
-    pricingType: 'fixed', // NEW
+    pricingType: 'fixed',
+    department: 'Engineering',
+    costCenter: '',
+    vendor: '',
+    accountNumber: '',
+    autoRenew: false,
+    budget: '',
   });
 
-  // ----- Helpers for cost logic -----
+  // Helper function to parse subscription data from API
+  const parseSubscriptionData = (data: any[]): Subscription[] => {
+    return data.map((sub: any) => ({
+      ...sub,
+      cost: typeof sub.cost === 'string' ? parseFloat(sub.cost) : sub.cost,
+      budget: sub.budget ? (typeof sub.budget === 'string' ? parseFloat(sub.budget) : sub.budget) : undefined,
+      currentMonthCost: sub.currentMonthCost ? (typeof sub.currentMonthCost === 'string' ? parseFloat(sub.currentMonthCost) : sub.currentMonthCost) : null,
+      lastMonthCost: sub.lastMonthCost ? (typeof sub.lastMonthCost === 'string' ? parseFloat(sub.lastMonthCost) : sub.lastMonthCost) : null,
+    }));
+  };
+
+  // Helpers for cost logic
   const normalizeToMonthly = (cost: number, billing: Subscription['billing']) => {
     if (billing === 'yearly') return cost / 12;
     if (billing === 'quarterly') return cost / 3;
@@ -165,23 +216,35 @@ export default function Dashboard() {
   };
 
   const effectiveChargeForPayment = (sub: Subscription) => {
-    // What to record in a Payment row when you click "Mark Paid"
     if (sub.pricingType === 'variable' && typeof sub.currentMonthCost === 'number') {
       return sub.currentMonthCost;
     }
-    // For fixed plans use full period cost (not normalized)
     return sub.cost;
   };
 
-  // ----- Derived values -----
+  // Enhanced stats with budget tracking
   const stats = useMemo(() => {
     const active = subscriptions.filter(s => s.status === 'active');
     const monthly = active.reduce((total, sub) => total + effectiveMonthly(sub), 0);
+    
+    const totalBudget = subscriptions.reduce((total, sub) => {
+      const budget = typeof sub.budget === 'string' ? parseFloat(sub.budget) : (sub.budget || 0);
+      return total + budget;
+    }, 0);
+    const budgetUtilization = totalBudget > 0 ? (monthly / (totalBudget / 12)) * 100 : 0;
 
-    const vendors = new Set(subscriptions.map(s => s.service)).size;
+    const vendors = new Set(subscriptions.map(s => s.vendor || s.service)).size;
     const paidCount = subscriptions.filter(s => s.lastPaymentStatus === 'paid').length;
     const pendingCount = subscriptions.filter(s => s.lastPaymentStatus === 'pending').length;
     const overdueCount = subscriptions.filter(s => s.lastPaymentStatus === 'overdue').length;
+
+    // Calculate savings (cancelled subscriptions this year)
+    const cancelledThisYear = subscriptions.filter(s => 
+      s.status === 'cancelled'
+    );
+    const savings = cancelledThisYear.reduce((total, sub) => 
+      total + normalizeToMonthly(sub.cost, sub.billing) * 12, 0
+    );
 
     return {
       monthly: monthly.toFixed(2),
@@ -192,7 +255,33 @@ export default function Dashboard() {
       paidCount,
       pendingCount,
       overdueCount,
+      totalBudget: (totalBudget).toFixed(2),
+      budgetUtilization: budgetUtilization.toFixed(1),
+      savings: savings.toFixed(2),
     };
+  }, [subscriptions]);
+
+  // Financial metrics by department
+  const departmentMetrics = useMemo(() => {
+    const metrics: Record<string, { spend: number; count: number; budget: number }> = {};
+    
+    subscriptions.filter(s => s.status === 'active').forEach(sub => {
+      const dept = sub.department || 'Unassigned';
+      if (!metrics[dept]) {
+        metrics[dept] = { spend: 0, count: 0, budget: 0 };
+      }
+      metrics[dept].spend += effectiveMonthly(sub);
+      metrics[dept].count += 1;
+      metrics[dept].budget += (sub.budget || 0) / 12;
+    });
+
+    return Object.entries(metrics)
+      .map(([dept, data]) => ({
+        department: dept,
+        ...data,
+        utilization: data.budget > 0 ? (data.spend / data.budget) * 100 : 0,
+      }))
+      .sort((a, b) => b.spend - a.spend);
   }, [subscriptions]);
 
   const upcomingRenewals = useMemo(() => {
@@ -216,6 +305,9 @@ export default function Dashboard() {
     if (categoryFilter !== 'all') {
       filtered = filtered.filter(sub => sub.category === categoryFilter);
     }
+    if (departmentFilter !== 'all') {
+      filtered = filtered.filter(sub => sub.department === departmentFilter);
+    }
     if (paymentFilter !== 'all') {
       filtered = filtered.filter(sub => sub.lastPaymentStatus === paymentFilter);
     }
@@ -224,14 +316,53 @@ export default function Dashboard() {
       filtered = filtered.filter(sub =>
         sub.service.toLowerCase().includes(q) ||
         sub.company.toLowerCase().includes(q) ||
+        (sub.vendor && sub.vendor.toLowerCase().includes(q)) ||
         (sub.manager && sub.manager.toLowerCase().includes(q)) ||
+        (sub.accountNumber && sub.accountNumber.toLowerCase().includes(q)) ||
         (sub.tags && sub.tags.some(tag => tag.toLowerCase().includes(q)))
       );
     }
     return filtered;
-  }, [subscriptions, companyFilter, categoryFilter, paymentFilter, searchTerm]);
+  }, [subscriptions, companyFilter, categoryFilter, departmentFilter, paymentFilter, searchTerm]);
 
-  // ----- Effects -----
+  // Generate financial report
+  const generateFinancialReport = (): FinancialReport => {
+    const activeSubscriptions = subscriptions.filter(s => s.status === 'active');
+    
+    const byCompany: Record<string, number> = {};
+    const byCategory: Record<string, number> = {};
+    const byDepartment: Record<string, number> = {};
+    
+    let totalSpend = 0;
+    
+    activeSubscriptions.forEach(sub => {
+      const monthlyAmount = effectiveMonthly(sub);
+      totalSpend += monthlyAmount;
+      
+      byCompany[sub.company] = (byCompany[sub.company] || 0) + monthlyAmount;
+      byCategory[sub.category || 'Other'] = (byCategory[sub.category || 'Other'] || 0) + monthlyAmount;
+      byDepartment[sub.department || 'Unassigned'] = (byDepartment[sub.department || 'Unassigned'] || 0) + monthlyAmount;
+    });
+
+    return {
+      period: new Date().toISOString().slice(0, 7),
+      totalSpend,
+      byCompany: Object.entries(byCompany).map(([company, amount]) => ({ company, amount })),
+      byCategory: Object.entries(byCategory).map(([category, amount]) => ({ category, amount })),
+      byDepartment: Object.entries(byDepartment).map(([department, amount]) => ({ department, amount })),
+      savings: parseFloat(stats.savings),
+      projectedSpend: totalSpend * 12,
+      budgetUtilization: parseFloat(stats.budgetUtilization),
+    };
+  };
+
+  // Payment history for a subscription
+  const getPaymentHistory = (subscriptionId: number): Payment[] => {
+    const sub = subscriptions.find(s => s.id === subscriptionId);
+    return sub?.payments || [];
+  };
+
+  // Effects
   useEffect(() => {
     if (status === 'unauthenticated') {
       router.push('/login');
@@ -244,7 +375,7 @@ export default function Dashboard() {
       setIsLoading(true);
       try {
         const data = await api.getSubscriptions();
-        setSubscriptions(data);
+        setSubscriptions(parseSubscriptionData(data));
       } catch (error) {
         console.error('Error loading subscriptions:', error);
         setSubscriptions([]);
@@ -255,7 +386,6 @@ export default function Dashboard() {
     loadSubscriptions();
   }, [status]);
 
-  // ----- Conditional returns AFTER hooks/useMemo -----
   if (status === 'loading') {
     return (
       <div style={fullHeightCenter('#F9FAFB')}>
@@ -344,13 +474,13 @@ export default function Dashboard() {
         status: 'paid',
         method: subscription.paymentMethod,
         reference: `PAY-${Date.now()}`,
+        invoiceNumber: `INV-${Date.now()}`,
       };
 
       await api.markAsPaid(subscriptionId, payment);
 
-      // Reload
       const data = await api.getSubscriptions();
-      setSubscriptions(data);
+      setSubscriptions(parseSubscriptionData(data));
     } catch (error) {
       console.error('Error marking as paid:', error);
       alert('Failed to update payment status');
@@ -375,23 +505,87 @@ export default function Dashboard() {
         return;
       }
 
-      // Cast to any to avoid type errors if your api typings aren't updated yet
       await (api as any).upsertSubscriptionCost(subscriptionId, { period, amount, source: 'manual' });
 
       const data = await api.getSubscriptions();
-      setSubscriptions(data);
+      setSubscriptions(parseSubscriptionData(data));
     } catch (err) {
       console.error('logActualCost error', err);
       alert('Failed to log cost');
     }
   };
 
-  const handleExport = () => {
-    const blob = new Blob([JSON.stringify(subscriptions, null, 2)], { type: 'application/json' });
+  const handleExport = (format: 'json' | 'csv') => {
+    if (format === 'json') {
+      const blob = new Blob([JSON.stringify(subscriptions, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `subscriptions_${new Date().toISOString().split('T')[0]}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } else if (format === 'csv') {
+      const headers = ['Company', 'Service', 'Cost', 'Billing', 'Status', 'Department', 'Category', 'Next Billing', 'Manager'];
+      const rows = subscriptions.map(sub => [
+        sub.company,
+        sub.service,
+        sub.cost,
+        sub.billing,
+        sub.status,
+        sub.department || '',
+        sub.category || '',
+        sub.nextBilling || '',
+        sub.manager || '',
+      ]);
+      
+      const csvContent = [
+        headers.join(','),
+        ...rows.map(row => row.map(cell => `"${cell}"`).join(','))
+      ].join('\n');
+      
+      const blob = new Blob([csvContent], { type: 'text/csv' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `subscriptions_${new Date().toISOString().split('T')[0]}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+  };
+
+  const exportFinancialReport = () => {
+    const report = generateFinancialReport();
+    const reportContent = {
+      generatedAt: new Date().toISOString(),
+      period: report.period,
+      summary: {
+        totalMonthlySpend: report.totalSpend,
+        projectedAnnualSpend: report.projectedSpend,
+        yearToDateSavings: report.savings,
+        budgetUtilization: `${report.budgetUtilization}%`,
+      },
+      breakdowns: {
+        byCompany: report.byCompany,
+        byCategory: report.byCategory,
+        byDepartment: report.byDepartment,
+      },
+      subscriptions: filteredSubscriptions.map(sub => ({
+        service: sub.service,
+        company: sub.company,
+        monthlyCost: effectiveMonthly(sub),
+        annualCost: effectiveMonthly(sub) * 12,
+        department: sub.department,
+        category: sub.category,
+        status: sub.status,
+        paymentStatus: sub.lastPaymentStatus,
+      })),
+    };
+
+    const blob = new Blob([JSON.stringify(reportContent, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'subscriptions.json';
+    a.download = `financial_report_${report.period}.json`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -410,23 +604,27 @@ export default function Dashboard() {
       return;
     }
 
+    const parsedBudget = formData.budget ? parseFloat(formData.budget) : undefined;
+
     try {
       if (editingId !== null) {
         await api.updateSubscription(editingId, {
           ...formData,
           cost: parsedCost,
+          budget: parsedBudget,
           tags: currentTags,
         });
       } else {
         await api.createSubscription({
           ...formData,
           cost: parsedCost,
+          budget: parsedBudget,
           tags: currentTags,
         });
       }
 
       const data = await api.getSubscriptions();
-      setSubscriptions(data);
+      setSubscriptions(parseSubscriptionData(data));
       resetForm();
     } catch (error) {
       console.error('Error saving subscription:', error);
@@ -453,6 +651,12 @@ export default function Dashboard() {
       payments: [],
       lastPaymentStatus: 'pending',
       pricingType: 'fixed',
+      department: 'Engineering',
+      costCenter: '',
+      vendor: '',
+      accountNumber: '',
+      autoRenew: false,
+      budget: '',
     });
     setCurrentTags([]);
     setTagInput('');
@@ -465,6 +669,7 @@ export default function Dashboard() {
     setFormData({
       ...rest,
       cost: sub.cost.toString(),
+      budget: sub.budget?.toString() || '',
       pricingType: sub.pricingType || 'fixed',
     });
     setCurrentTags(sub.tags || []);
@@ -477,7 +682,7 @@ export default function Dashboard() {
       try {
         await api.deleteSubscription(id);
         const data = await api.getSubscriptions();
-        setSubscriptions(data);
+        setSubscriptions(parseSubscriptionData(data));
       } catch (error) {
         console.error('Error deleting subscription:', error);
         alert('Failed to delete subscription');
@@ -587,14 +792,66 @@ export default function Dashboard() {
                 {session.user.email}
               </span>
             )}
-            <button
-              onClick={handleExport}
-              style={ghostBtn}
-              onMouseEnter={hoverFill}
-              onMouseLeave={hoverReset}
-            >
-              Export Data
-            </button>
+            <div style={{ position: 'relative' }}>
+              <button
+                onClick={() => {}}
+                style={ghostBtn}
+                onMouseEnter={(e) => {
+                  const menu = document.getElementById('export-menu');
+                  if (menu) menu.style.display = 'block';
+                }}
+                onMouseLeave={(e) => {
+                  setTimeout(() => {
+                    const menu = document.getElementById('export-menu');
+                    if (menu && !menu.matches(':hover')) menu.style.display = 'none';
+                  }, 100);
+                }}
+              >
+                Export
+              </button>
+              <div
+                id="export-menu"
+                style={{
+                  position: 'absolute',
+                  top: '100%',
+                  right: 0,
+                  background: '#FFFFFF',
+                  border: '1px solid #E5E7EB',
+                  borderRadius: '6px',
+                  padding: '8px 0',
+                  minWidth: '120px',
+                  boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)',
+                  display: 'none',
+                }}
+                onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.display = 'block'; }}
+                onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.display = 'none'; }}
+              >
+                <button
+                  onClick={() => handleExport('json')}
+                  style={menuItem}
+                  onMouseEnter={e => (e.currentTarget as HTMLButtonElement).style.background = '#F3F4F6'}
+                  onMouseLeave={e => (e.currentTarget as HTMLButtonElement).style.background = 'transparent'}
+                >
+                  Export JSON
+                </button>
+                <button
+                  onClick={() => handleExport('csv')}
+                  style={menuItem}
+                  onMouseEnter={e => (e.currentTarget as HTMLButtonElement).style.background = '#F3F4F6'}
+                  onMouseLeave={e => (e.currentTarget as HTMLButtonElement).style.background = 'transparent'}
+                >
+                  Export CSV
+                </button>
+                <button
+                  onClick={exportFinancialReport}
+                  style={menuItem}
+                  onMouseEnter={e => (e.currentTarget as HTMLButtonElement).style.background = '#F3F4F6'}
+                  onMouseLeave={e => (e.currentTarget as HTMLButtonElement).style.background = 'transparent'}
+                >
+                  Financial Report
+                </button>
+              </div>
+            </div>
             <button
               onClick={() => setShowHelpModal(true)}
               style={ghostBtn}
@@ -634,10 +891,10 @@ export default function Dashboard() {
         {/* Header */}
         <div style={{ marginBottom: '32px' }}>
           <h1 style={{ fontSize: '30px', fontWeight: '700', color: '#111827', marginBottom: '8px' }}>
-            Subscription Management
+            Subscription Management Dashboard
           </h1>
           <p style={{ color: '#6B7280', fontSize: '14px' }}>
-            Track, manage, and optimize your business subscriptions
+            Track, manage, and optimize your business subscriptions with financial insights
           </p>
         </div>
 
@@ -685,7 +942,7 @@ export default function Dashboard() {
               </div>
             )}
 
-            {/* Metrics */}
+            {/* Enhanced Metrics */}
             <div style={{
               display: 'grid',
               gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
@@ -702,8 +959,21 @@ export default function Dashboard() {
               <MetricCard
                 label="Annual Projection"
                 value={formatCurrency(parseFloat(stats.yearly))}
-                trend="-3.2%"
+                sublabel={`Budget: ${formatCurrency(parseFloat(stats.totalBudget))}`}
                 icon={<IconCalendarMoney />}
+              />
+              <MetricCard
+                label="Budget Utilization"
+                value={`${stats.budgetUtilization}%`}
+                sublabel="of allocated budget"
+                alert={parseFloat(stats.budgetUtilization) > 90}
+                icon={<IconBudget />}
+              />
+              <MetricCard
+                label="YTD Savings"
+                value={formatCurrency(parseFloat(stats.savings))}
+                sublabel="from cancelled services"
+                icon={<IconSavings />}
               />
               <MetricCard
                 label="Active Subscriptions"
@@ -723,6 +993,12 @@ export default function Dashboard() {
                 sublabel="paid this period"
                 alert={stats.overdueCount > 0}
                 icon={<IconPayment />}
+              />
+              <MetricCard
+                label="Departments"
+                value={departmentMetrics.length.toString()}
+                sublabel="active departments"
+                icon={<IconDepartment />}
               />
             </div>
 
@@ -756,7 +1032,7 @@ export default function Dashboard() {
                       fontSize: '14px',
                       outline: 'none',
                       transition: 'border-color 0.2s'
-                    } as React.CSSProperties}
+                    }}
                     onFocus={e => e.currentTarget.style.borderColor = '#4F46E5'}
                     onBlur={e => e.currentTarget.style.borderColor = '#E5E7EB'}
                   />
@@ -782,6 +1058,17 @@ export default function Dashboard() {
                   <option value="all">All Categories</option>
                   {CATEGORIES.map(c => (
                     <option key={c} value={c}>{c}</option>
+                  ))}
+                </select>
+
+                <select
+                  value={departmentFilter}
+                  onChange={e => setDepartmentFilter(e.target.value)}
+                  style={selectStyle}
+                >
+                  <option value="all">All Departments</option>
+                  {DEPARTMENTS.map(d => (
+                    <option key={d} value={d}>{d}</option>
                   ))}
                 </select>
 
@@ -821,11 +1108,34 @@ export default function Dashboard() {
                   <ViewToggleButton
                     active={viewMode === 'analytics'}
                     onClick={() => setViewMode('analytics')}
-                    last
                   >
                     <IconBars />
                   </ViewToggleButton>
+                  <ViewToggleButton
+                    active={viewMode === 'reports'}
+                    onClick={() => setViewMode('reports')}
+                    last
+                  >
+                    <IconReport />
+                  </ViewToggleButton>
                 </div>
+
+                {/* Actions */}
+                <button
+                  onClick={() => setShowFinancialReportModal(true)}
+                  style={outlineBtn}
+                  onMouseEnter={e => {
+                    e.currentTarget.style.background = '#F9FAFB';
+                    (e.currentTarget.style as any).borderColor = '#D1D5DB';
+                  }}
+                  onMouseLeave={e => {
+                    e.currentTarget.style.background = 'transparent';
+                    (e.currentTarget.style as any).borderColor = '#E5E7EB';
+                  }}
+                >
+                  <IconReport />
+                  Reports
+                </button>
 
                 {/* Add */}
                 <button
@@ -859,6 +1169,10 @@ export default function Dashboard() {
                       setSelectedSubscription(sub);
                       setShowDocumentsModal(true);
                     }}
+                    onViewPaymentHistory={() => {
+                      setSelectedSubscription(sub);
+                      setShowPaymentHistoryModal(true);
+                    }}
                     onMarkPaid={() => markAsPaid(sub.id)}
                     onLogCost={() => logActualCost(sub.id)}
                     onUpload={(e: ChangeEvent<HTMLInputElement>) => handleFileUpload(e, sub.id)}
@@ -883,20 +1197,27 @@ export default function Dashboard() {
                   setSelectedSubscription(sub);
                   setShowDocumentsModal(true);
                 }}
+                onViewPaymentHistory={(sub: Subscription) => {
+                  setSelectedSubscription(sub);
+                  setShowPaymentHistoryModal(true);
+                }}
                 formatCurrency={formatCurrency}
                 formatDate={formatDate}
                 getCompanyColor={getCompanyColor}
               />
+            ) : viewMode === 'analytics' ? (
+              <AnalyticsView
+                subscriptions={filteredSubscriptions}
+                departmentMetrics={departmentMetrics}
+                formatCurrency={formatCurrency}
+              />
             ) : (
-              <div style={cardBox(48)}>
-                <IconBarsLarge />
-                <h3 style={{ fontSize: '18px', fontWeight: '600', color: '#111827', marginBottom: '8px' }}>
-                  Analytics Coming Soon
-                </h3>
-                <p style={{ color: '#6B7280', fontSize: '14px' }}>
-                  Advanced analytics and reporting features are under development
-                </p>
-              </div>
+              <ReportsView
+                subscriptions={filteredSubscriptions}
+                generateReport={generateFinancialReport}
+                formatCurrency={formatCurrency}
+                onExportReport={exportFinancialReport}
+              />
             )}
           </>
         )}
@@ -918,6 +1239,7 @@ export default function Dashboard() {
             formatFileSize={formatFileSize}
             COMPANIES={COMPANIES}
             CATEGORIES={CATEGORIES}
+            DEPARTMENTS={DEPARTMENTS}
             PAYMENT_METHODS={PAYMENT_METHODS}
           />
         )}
@@ -940,6 +1262,28 @@ export default function Dashboard() {
           />
         )}
 
+        {showPaymentHistoryModal && selectedSubscription && (
+          <PaymentHistoryModal
+            subscription={selectedSubscription}
+            payments={getPaymentHistory(selectedSubscription.id)}
+            onClose={() => {
+              setShowPaymentHistoryModal(false);
+              setSelectedSubscription(null);
+            }}
+            formatDate={formatDate}
+            formatCurrency={formatCurrency}
+          />
+        )}
+
+        {showFinancialReportModal && (
+          <FinancialReportModal
+            report={generateFinancialReport()}
+            onClose={() => setShowFinancialReportModal(false)}
+            onExport={exportFinancialReport}
+            formatCurrency={formatCurrency}
+          />
+        )}
+
         {showHelpModal && (
           <div
             style={backdrop}
@@ -948,8 +1292,8 @@ export default function Dashboard() {
             }}
           >
             <div style={modalBox(800)}>
-              <ModalHeader title="How to Manage Variable Cost Subscriptions" onClose={() => setShowHelpModal(false)} />
-              <div style={{ padding: '24px' }}>
+              <ModalHeader title="Enhanced Features Guide" onClose={() => setShowHelpModal(false)} />
+              <div style={{ padding: '24px', maxHeight: '60vh', overflow: 'auto' }}>
                 <div style={{
                   background: 'linear-gradient(135deg, #EDE9FE 0%, #DDD6FE 100%)',
                   borderRadius: '8px',
@@ -957,12 +1301,44 @@ export default function Dashboard() {
                   marginBottom: '24px'
                 }}>
                   <h3 style={{ fontSize: '16px', fontWeight: '600', color: '#5B21B6', marginBottom: '8px' }}>
-                    🎯 Perfect for Microsoft 365, Azure, AWS & Variable Services
+                    🎯 Complete Financial Management
                   </h3>
                   <p style={{ fontSize: '14px', color: '#6D28D9', margin: 0 }}>
-                    Track subscriptions that change monthly due to seat count, tiers, or consumption.
-                    Store actuals by month, compute averages, and highlight cost spikes.
+                    Track subscriptions with department allocation, budget management, and comprehensive financial reporting.
                   </p>
+                </div>
+
+                <div style={{ display: 'grid', gap: '16px' }}>
+                  <FeatureCard
+                    icon="📊"
+                    title="Financial Reports"
+                    description="Generate monthly, quarterly, and yearly financial reports with breakdowns by company, category, and department."
+                  />
+                  <FeatureCard
+                    icon="💰"
+                    title="Budget Tracking"
+                    description="Set and monitor budgets for each subscription and department. Get alerts when approaching limits."
+                  />
+                  <FeatureCard
+                    icon="📜"
+                    title="Payment History"
+                    description="View complete payment history for each subscription with invoice numbers and payment references."
+                  />
+                  <FeatureCard
+                    icon="🏢"
+                    title="Department Management"
+                    description="Allocate subscriptions to departments and track spending by cost center."
+                  />
+                  <FeatureCard
+                    icon="📈"
+                    title="Analytics Dashboard"
+                    description="Visualize spending trends, vendor analysis, and department utilization."
+                  />
+                  <FeatureCard
+                    icon="📁"
+                    title="Export Options"
+                    description="Export data in JSON, CSV, or generate comprehensive financial reports."
+                  />
                 </div>
               </div>
             </div>
@@ -978,7 +1354,7 @@ export default function Dashboard() {
    ========================= */
 
 const Spinner = () => (
-  <>
+  <div>
     <div style={{
       width: '40px',
       height: '40px',
@@ -988,14 +1364,13 @@ const Spinner = () => (
       animation: 'spin 1s linear infinite',
       margin: '0 auto 16px'
     }} />
-    {/* styled-jsx for spinner */}
-    <style jsx>{`
+    <style>{`
       @keyframes spin {
         0% { transform: rotate(0deg); }
         100% { transform: rotate(360deg); }
       }
     `}</style>
-  </>
+  </div>
 );
 
 const Alert = ({
@@ -1065,6 +1440,19 @@ const IconCalendarMoney = () => (
   </svg>
 );
 
+const IconBudget = () => (
+  <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
+    <path fillRule="evenodd" d="M3 4a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 4a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 4a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 4a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1z" clipRule="evenodd" />
+  </svg>
+);
+
+const IconSavings = () => (
+  <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
+    <path d="M4 4a2 2 0 00-2 2v1h16V6a2 2 0 00-2-2H4z" />
+    <path fillRule="evenodd" d="M18 9H2v5a2 2 0 002 2h12a2 2 0 002-2V9zM4 13a1 1 0 011-1h1a1 1 0 110 2H5a1 1 0 01-1-1zm5-1a1 1 0 100 2h1a1 1 0 100-2H9z" clipRule="evenodd" />
+  </svg>
+);
+
 const IconActive = () => (
   <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
     <path d="M9 2a1 1 0 000 2h2a1 1 0 100-2H9z" />
@@ -1081,6 +1469,12 @@ const IconVendors = () => (
 const IconPayment = () => (
   <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
     <path fillRule="evenodd" d="M4 4a2 2 0 00-2 2v4a2 2 0 002 2V6h10a2 2 0 00-2-2H4zm2 6a2 2 0 012-2h8a2 2 0 012 2v4a2 2 0 01-2 2H8a2 2 0 01-2-2v-4zm6 4a2 2 0 100-4 2 2 0 000 4z" clipRule="evenodd" />
+  </svg>
+);
+
+const IconDepartment = () => (
+  <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
+    <path fillRule="evenodd" d="M4 4a2 2 0 012-2h8a2 2 0 012 2v12a2 2 0 01-2 2H6a2 2 0 01-2-2V4zm3 1h6v4H7V5zm6 6H7v2h6v-2z" clipRule="evenodd" />
   </svg>
 );
 
@@ -1102,6 +1496,12 @@ const IconBars = () => (
   </svg>
 );
 
+const IconReport = () => (
+  <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor" style={{ marginRight: 6 }}>
+    <path fillRule="evenodd" d="M6 2a2 2 0 00-2 2v12a2 2 0 002 2h8a2 2 0 002-2V7.414A2 2 0 0015.414 6L12 2.586A2 2 0 0010.586 2H6zm2 10a1 1 0 10-2 0v3a1 1 0 102 0v-3zm2-3a1 1 0 011 1v5a1 1 0 11-2 0v-5a1 1 0 011-1zm4-1a1 1 0 10-2 0v7a1 1 0 102 0V8z" clipRule="evenodd" />
+  </svg>
+);
+
 const IconBarsLarge = () => (
   <svg width="64" height="64" viewBox="0 0 20 20" fill="#E5E7EB" style={{ margin: '0 auto 16px' }}>
     <path d="M2 11a1 1 0 011-1h2a1 1 0 011 1v5a1 1 0 01-1 1H3a1 1 0 01-1-1v-5zM8 7a1 1 0 011-1h2a1 1 0 011 1v9a1 1 0 01-1 1H9a1 1 0 01-1-1V7zM14 4a1 1 0 011-1h2a1 1 0 011 1v12a1 1 0 01-1 1h-2a1 1 0 01-1-1V4z" />
@@ -1117,6 +1517,18 @@ const IconPlus = () => (
 /* =========================
    Buttons & Styles
    ========================= */
+
+const menuItem: React.CSSProperties = {
+  width: '100%',
+  padding: '8px 16px',
+  background: 'transparent',
+  border: 'none',
+  textAlign: 'left',
+  fontSize: '14px',
+  color: '#374151',
+  cursor: 'pointer',
+  transition: 'background 0.2s',
+};
 
 const ghostBtn: React.CSSProperties = {
   padding: '8px 16px',
@@ -1139,7 +1551,10 @@ const outlineBtn: React.CSSProperties = {
   fontWeight: '500',
   cursor: 'pointer',
   borderRadius: '6px',
-  transition: 'all 0.2s'
+  transition: 'all 0.2s',
+  display: 'flex',
+  alignItems: 'center',
+  gap: '6px',
 };
 
 const primaryBtn: React.CSSProperties = {
@@ -1353,7 +1768,74 @@ const EmptyState = ({ onAddClick }: any) => (
 );
 
 /* =========================
-   Subscription Card
+   Feature Card (for Help Modal)
+   ========================= */
+
+const FeatureCard = ({ icon, title, description }: any) => (
+  <div style={{
+    display: 'flex',
+    gap: '12px',
+    padding: '12px',
+    background: '#F9FAFB',
+    borderRadius: '6px'
+  }}>
+    <div style={{ fontSize: '24px' }}>{icon}</div>
+    <div>
+      <h4 style={{ fontSize: '14px', fontWeight: '600', color: '#111827', marginBottom: '4px' }}>
+        {title}
+      </h4>
+      <p style={{ fontSize: '13px', color: '#6B7280', margin: 0 }}>
+        {description}
+      </p>
+    </div>
+  </div>
+);
+
+/* =========================
+   Analytics View Component
+   ========================= */
+
+const AnalyticsView = ({ subscriptions, departmentMetrics, formatCurrency }: any) => (
+  <div style={cardBox(48)}>
+    <IconBarsLarge />
+    <h3 style={{ fontSize: '18px', fontWeight: '600', color: '#111827', marginBottom: '8px' }}>
+      Analytics Dashboard
+    </h3>
+    <p style={{ color: '#6B7280', fontSize: '14px', marginBottom: '24px' }}>
+      Comprehensive analytics showing department spending, vendor analysis, and trends
+    </p>
+    <p style={{ fontSize: '12px', color: '#9CA3AF' }}>
+      (Import the full AnalyticsView component from financial-components.tsx)
+    </p>
+  </div>
+);
+
+/* =========================
+   Reports View Component
+   ========================= */
+
+const ReportsView = ({ subscriptions, generateReport, formatCurrency, onExportReport }: any) => (
+  <div style={cardBox(48)}>
+    <IconReport />
+    <h3 style={{ fontSize: '18px', fontWeight: '600', color: '#111827', marginBottom: '8px' }}>
+      Financial Reports
+    </h3>
+    <p style={{ color: '#6B7280', fontSize: '14px', marginBottom: '24px' }}>
+      Generate and export comprehensive financial reports for accounting
+    </p>
+    <button
+      onClick={onExportReport}
+      style={primaryBtn}
+      onMouseEnter={e => e.currentTarget.style.background = '#4338CA'}
+      onMouseLeave={e => e.currentTarget.style.background = '#4F46E5'}
+    >
+      Export Financial Report
+    </button>
+  </div>
+);
+
+/* =========================
+   Subscription Card - ENHANCED (Part 1)
    ========================= */
 
 const SubscriptionCard = ({
@@ -1361,6 +1843,7 @@ const SubscriptionCard = ({
   onEdit,
   onDelete,
   onViewDocuments,
+  onViewPaymentHistory,
   onMarkPaid,
   onLogCost,
   onUpload,
@@ -1414,12 +1897,17 @@ const SubscriptionCard = ({
                 background: getCompanyColor(sub.company)
               }} />
               <span style={{ fontSize: '12px', fontWeight: '500', color: '#6B7280' }}>
-                {sub.company}
+                {sub.company} {sub.department && `• ${sub.department}`}
               </span>
             </div>
             <h3 style={{ fontSize: '16px', fontWeight: '600', color: '#111827', marginBottom: '8px' }}>
               {sub.service}
             </h3>
+            {sub.vendor && (
+              <div style={{ fontSize: '12px', color: '#6B7280', marginBottom: '4px' }}>
+                Vendor: {sub.vendor}
+              </div>
+            )}
             {sub.tags && sub.tags.length > 0 && (
               <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
                 {sub.tags.map((tag: string) => (
@@ -1437,11 +1925,14 @@ const SubscriptionCard = ({
           <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', alignItems: 'flex-end' }}>
             <span style={badge(statusColors)}>{sub.status.toUpperCase()}</span>
             <span style={badge(paymentColors)}>{(sub.lastPaymentStatus || 'pending').toUpperCase()}</span>
+            {sub.autoRenew && (
+              <span style={badge({ bg: '#E0E7FF', text: '#3730A3' })}>AUTO-RENEW</span>
+            )}
           </div>
         </div>
       </div>
 
-      {/* Cost (shows actual for variable when available) */}
+      {/* Cost with Budget */}
       <div style={{ marginBottom: '16px' }}>
         <div style={{ fontSize: '24px', fontWeight: '700', color: '#111827' }}>
           {formatCurrency(displayAmount)}
@@ -1449,6 +1940,11 @@ const SubscriptionCard = ({
             /{sub.billing === 'monthly' ? 'mo' : sub.billing === 'yearly' ? 'yr' : 'qtr'}
           </span>
         </div>
+        {sub.budget && (
+          <div style={{ fontSize: '12px', color: '#6B7280', marginTop: '4px' }}>
+            Budget: {formatCurrency(sub.budget)}/yr
+          </div>
+        )}
       </div>
 
       {/* Details */}
@@ -1456,6 +1952,7 @@ const SubscriptionCard = ({
         <DetailRow label="Next Billing" value={formatDate(sub.nextBilling)} />
         <DetailRow label="Category" value={sub.category} />
         {sub.manager && <DetailRow label="Manager" value={sub.manager} />}
+        {sub.accountNumber && <DetailRow label="Account #" value={sub.accountNumber} />}
         <DetailRow label="Documents" value={`${sub.attachments?.length ?? sub.attachment_count ?? 0} files`} />
       </div>
 
@@ -1473,6 +1970,13 @@ const SubscriptionCard = ({
             <path fillRule="evenodd" d="M4 4a2 2 0 00-2 2v8a2 2 0 002 2h12a2 2 0 002-2V6a2 2 0 00-2-2h-5L9 2H4z" clipRule="evenodd" />
           </svg>
           Documents
+        </ActionButton>
+
+        <ActionButton onClick={onViewPaymentHistory}>
+          <svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor">
+            <path fillRule="evenodd" d="M4 4a2 2 0 00-2 2v1h16V6a2 2 0 00-2-2H4zM18 9H2v5a2 2 0 002 2h12a2 2 0 002-2V9zM4 13a1 1 0 011-1h1a1 1 0 110 2H5a1 1 0 01-1-1zm5-1a1 1 0 100 2h1a1 1 0 100-2H9z" clipRule="evenodd" />
+          </svg>
+          History
         </ActionButton>
 
         {sub.lastPaymentStatus !== 'paid' && (
@@ -1502,8 +2006,7 @@ const SubscriptionCard = ({
           }}
         >
           <svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor">
-            <path fillRule="evenodd" d="M8 4a3 3 0 00-3 3v4a3 3 0 003 3h4a3 3 0 003-3V7a3 3 0 00-3-3H8zm0 2h4a1 1 0 011 1v4a1 1 0 01-1 1H8a1 1 0 01-1-1V7a1 1 0 011-1z" clipRule="evenodd" />
-            <path d="M8 9a1 1 0 000 2h4a1 1 0 100-2H8z" />
+            <path fillRule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zM6.293 6.707a1 1 0 010-1.414l3-3a1 1 0 011.414 0l3 3a1 1 0 11-1.414 1.414L11 5.414V13a1 1 0 11-2 0V5.414L7.707 6.707a1 1 0 01-1.414 0z" clipRule="evenodd" />
           </svg>
           Upload
           <input
@@ -1603,7 +2106,7 @@ const ActionButton = ({ onClick, children, primary, success, danger }: any) => {
 };
 
 /* =========================
-   Table View & Helpers
+   Table View - ENHANCED (Part 2)
    ========================= */
 
 const TableView = ({
@@ -1614,6 +2117,7 @@ const TableView = ({
   onLogCost,
   onUpload,
   onViewDocuments,
+  onViewPaymentHistory,
   formatCurrency,
   formatDate,
   getCompanyColor
@@ -1630,7 +2134,9 @@ const TableView = ({
           <tr style={{ background: '#F9FAFB', borderBottom: '1px solid #E5E7EB' }}>
             <th style={th}>Company</th>
             <th style={th}>Service</th>
+            <th style={th}>Department</th>
             <th style={th}>Cost</th>
+            <th style={th}>Budget</th>
             <th style={th}>Status</th>
             <th style={th}>Payment</th>
             <th style={th}>Next Billing</th>
@@ -1678,6 +2184,9 @@ const TableView = ({
                     )}
                   </div>
                 </td>
+                <td style={{ ...td, fontSize: '14px', color: '#6B7280' }}>
+                  {sub.department || '-'}
+                </td>
                 <td style={td}>
                   <div style={{ fontSize: '14px', fontWeight: '600', color: '#111827' }}>
                     {formatCurrency(displayAmount)}
@@ -1685,6 +2194,9 @@ const TableView = ({
                       /{sub.billing === 'monthly' ? 'mo' : sub.billing === 'yearly' ? 'yr' : 'qtr'}
                     </span>
                   </div>
+                </td>
+                <td style={{ ...td, fontSize: '14px', color: '#6B7280' }}>
+                  {sub.budget ? formatCurrency(sub.budget) : '-'}
                 </td>
                 <td style={td}>
                   <StatusBadge status={sub.status} />
@@ -1708,6 +2220,11 @@ const TableView = ({
                     <TableActionButton onClick={() => onViewDocuments(sub)} title="Documents">
                       <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor">
                         <path fillRule="evenodd" d="M4 4a2 2 0 00-2 2v8a2 2 0 002 2h12a2 2 0 002-2V6a2 2 0 00-2-2h-5L9 2H4z" clipRule="evenodd" />
+                      </svg>
+                    </TableActionButton>
+                    <TableActionButton onClick={() => onViewPaymentHistory(sub)} title="Payment History">
+                      <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor">
+                        <path fillRule="evenodd" d="M4 4a2 2 0 00-2 2v1h16V6a2 2 0 00-2-2H4zM18 9H2v5a2 2 0 002 2h12a2 2 0 002-2V9zM4 13a1 1 0 011-1h1a1 1 0 110 2H5a1 1 0 01-1-1zm5-1a1 1 0 100 2h1a1 1 0 100-2H9z" clipRule="evenodd" />
                       </svg>
                     </TableActionButton>
                     <TableActionButton onClick={() => onLogCost(sub.id)} title="Log Cost">
@@ -1813,17 +2330,17 @@ const PaymentStatusBadge = ({ status }: any) => {
 };
 
 /* =========================
-   Form Modal
+   Form Modal - ENHANCED (Part 3)
    ========================= */
 
 const FormModal = ({
   editingId, formData, setFormData,
   currentTags, tagInput, setTagInput,
   onSubmit, onClose, onAddTag, onRemoveTag,
-  onFileUpload, formatFileSize, COMPANIES, CATEGORIES, PAYMENT_METHODS
+  onFileUpload, formatFileSize, COMPANIES, CATEGORIES, DEPARTMENTS, PAYMENT_METHODS
 }: any) => (
   <div style={backdrop} onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-    <div style={modalBox(600)}>
+    <div style={modalBox(700)}>
       <div style={{
         padding: '24px',
         borderBottom: '1px solid #E5E7EB',
@@ -1852,151 +2369,265 @@ const FormModal = ({
         </button>
       </div>
 
-      <form onSubmit={onSubmit} style={{ padding: '24px' }}>
+      <form onSubmit={onSubmit} style={{ padding: '24px', maxHeight: '60vh', overflow: 'auto' }}>
         <div style={{ display: 'grid', gap: '16px' }}>
-          <FormField label="Company *">
-            <select
-              value={formData.company}
-              onChange={e => setFormData({ ...formData, company: e.target.value as any })}
-              style={inputStyle}
-              required
-            >
-              {COMPANIES.map((c: string) => (
-                <option key={c} value={c}>{c}</option>
-              ))}
-            </select>
-          </FormField>
+          {/* Basic Information */}
+          <div style={{
+            background: '#F9FAFB',
+            padding: '12px',
+            borderRadius: '6px',
+            marginBottom: '8px'
+          }}>
+            <h3 style={{ fontSize: '14px', fontWeight: '600', color: '#374151', margin: '0 0 12px 0' }}>
+              Basic Information
+            </h3>
+            
+            <div style={{ display: 'grid', gap: '16px' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+                <FormField label="Company *">
+                  <select
+                    value={formData.company}
+                    onChange={e => setFormData({ ...formData, company: e.target.value as any })}
+                    style={inputStyle}
+                    required
+                  >
+                    {COMPANIES.map((c: string) => (
+                      <option key={c} value={c}>{c}</option>
+                    ))}
+                  </select>
+                </FormField>
 
-          <FormField label="Service Name *">
-            <input
-              type="text"
-              value={formData.service}
-              onChange={e => setFormData({ ...formData, service: e.target.value })}
-              style={inputStyle}
-              placeholder="e.g., Microsoft 365, Azure, Salesforce"
-              required
-            />
-          </FormField>
+                <FormField label="Department">
+                  <select
+                    value={formData.department || ''}
+                    onChange={e => setFormData({ ...formData, department: e.target.value })}
+                    style={inputStyle}
+                  >
+                    <option value="">Select Department</option>
+                    {DEPARTMENTS.map((d: string) => (
+                      <option key={d} value={d}>{d}</option>
+                    ))}
+                  </select>
+                </FormField>
+              </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
-            <FormField label="Cost *">
-              <input
-                type="number"
-                value={formData.cost}
-                onChange={e => setFormData({ ...formData, cost: e.target.value })}
-                style={inputStyle}
-                placeholder="0.00"
-                step="0.01"
-                required
-              />
-            </FormField>
+              <FormField label="Service Name *">
+                <input
+                  type="text"
+                  value={formData.service}
+                  onChange={e => setFormData({ ...formData, service: e.target.value })}
+                  style={inputStyle}
+                  placeholder="e.g., Microsoft 365, Azure, Salesforce"
+                  required
+                />
+              </FormField>
 
-            <FormField label="Billing Cycle">
-              <select
-                value={formData.billing}
-                onChange={e => setFormData({ ...formData, billing: e.target.value as any })}
-                style={inputStyle}
-              >
-                <option value="monthly">Monthly</option>
-                <option value="yearly">Yearly</option>
-                <option value="quarterly">Quarterly</option>
-              </select>
-            </FormField>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+                <FormField label="Vendor">
+                  <input
+                    type="text"
+                    value={formData.vendor || ''}
+                    onChange={e => setFormData({ ...formData, vendor: e.target.value })}
+                    style={inputStyle}
+                    placeholder="e.g., Microsoft, Amazon"
+                  />
+                </FormField>
+
+                <FormField label="Account Number">
+                  <input
+                    type="text"
+                    value={formData.accountNumber || ''}
+                    onChange={e => setFormData({ ...formData, accountNumber: e.target.value })}
+                    style={inputStyle}
+                    placeholder="e.g., ACC-12345"
+                  />
+                </FormField>
+              </div>
+            </div>
           </div>
 
-          {/* NEW: Pricing Type */}
-          <FormField label="Pricing Type">
-            <select
-              value={formData.pricingType || 'fixed'}
-              onChange={e => setFormData({ ...formData, pricingType: e.target.value as 'fixed' | 'variable' })}
-              style={inputStyle}
-            >
-              <option value="fixed">Fixed</option>
-              <option value="variable">Variable (usage/consumption)</option>
-            </select>
-          </FormField>
+          {/* Financial Information */}
+          <div style={{
+            background: '#F9FAFB',
+            padding: '12px',
+            borderRadius: '6px',
+            marginBottom: '8px'
+          }}>
+            <h3 style={{ fontSize: '14px', fontWeight: '600', color: '#374151', margin: '0 0 12px 0' }}>
+              Financial Information
+            </h3>
 
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
-            <FormField label="Category">
-              <select
-                value={formData.category}
-                onChange={e => setFormData({ ...formData, category: e.target.value })}
-                style={inputStyle}
-              >
-                {CATEGORIES.map((c: string) => (
-                  <option key={c} value={c}>{c}</option>
-                ))}
-              </select>
-            </FormField>
+            <div style={{ display: 'grid', gap: '16px' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '16px' }}>
+                <FormField label="Cost *">
+                  <input
+                    type="number"
+                    value={formData.cost}
+                    onChange={e => setFormData({ ...formData, cost: e.target.value })}
+                    style={inputStyle}
+                    placeholder="0.00"
+                    step="0.01"
+                    required
+                  />
+                </FormField>
 
-            <FormField label="Payment Method">
-              <select
-                value={formData.paymentMethod}
-                onChange={e => setFormData({ ...formData, paymentMethod: e.target.value })}
-                style={inputStyle}
-              >
-                {PAYMENT_METHODS.map((m: string) => (
-                  <option key={m} value={m}>{m}</option>
-                ))}
-              </select>
-            </FormField>
+                <FormField label="Billing Cycle">
+                  <select
+                    value={formData.billing}
+                    onChange={e => setFormData({ ...formData, billing: e.target.value as any })}
+                    style={inputStyle}
+                  >
+                    <option value="monthly">Monthly</option>
+                    <option value="yearly">Yearly</option>
+                    <option value="quarterly">Quarterly</option>
+                  </select>
+                </FormField>
+
+                <FormField label="Annual Budget">
+                  <input
+                    type="number"
+                    value={formData.budget || ''}
+                    onChange={e => setFormData({ ...formData, budget: e.target.value })}
+                    style={inputStyle}
+                    placeholder="0.00"
+                    step="0.01"
+                  />
+                </FormField>
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+                <FormField label="Pricing Type">
+                  <select
+                    value={formData.pricingType || 'fixed'}
+                    onChange={e => setFormData({ ...formData, pricingType: e.target.value as 'fixed' | 'variable' })}
+                    style={inputStyle}
+                  >
+                    <option value="fixed">Fixed</option>
+                    <option value="variable">Variable (usage/consumption)</option>
+                  </select>
+                </FormField>
+
+                <FormField label="Payment Method">
+                  <select
+                    value={formData.paymentMethod}
+                    onChange={e => setFormData({ ...formData, paymentMethod: e.target.value })}
+                    style={inputStyle}
+                  >
+                    {PAYMENT_METHODS.map((m: string) => (
+                      <option key={m} value={m}>{m}</option>
+                    ))}
+                  </select>
+                </FormField>
+              </div>
+
+              <FormField label="Cost Center">
+                <input
+                  type="text"
+                  value={formData.costCenter || ''}
+                  onChange={e => setFormData({ ...formData, costCenter: e.target.value })}
+                  style={inputStyle}
+                  placeholder="e.g., CC-001"
+                />
+              </FormField>
+            </div>
           </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
-            <FormField label="Next Billing Date">
-              <input
-                type="date"
-                value={formData.nextBilling}
-                onChange={e => setFormData({ ...formData, nextBilling: e.target.value })}
-                style={inputStyle}
-              />
-            </FormField>
+          {/* Contract Information */}
+          <div style={{
+            background: '#F9FAFB',
+            padding: '12px',
+            borderRadius: '6px'
+          }}>
+            <h3 style={{ fontSize: '14px', fontWeight: '600', color: '#374151', margin: '0 0 12px 0' }}>
+              Contract Information
+            </h3>
 
-            <FormField label="Contract End Date">
-              <input
-                type="date"
-                value={formData.contractEnd}
-                onChange={e => setFormData({ ...formData, contractEnd: e.target.value })}
-                style={inputStyle}
-              />
-            </FormField>
+            <div style={{ display: 'grid', gap: '16px' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+                <FormField label="Category">
+                  <select
+                    value={formData.category}
+                    onChange={e => setFormData({ ...formData, category: e.target.value })}
+                    style={inputStyle}
+                  >
+                    {CATEGORIES.map((c: string) => (
+                      <option key={c} value={c}>{c}</option>
+                    ))}
+                  </select>
+                </FormField>
+
+                <FormField label="Status">
+                  <select
+                    value={formData.status}
+                    onChange={e => setFormData({ ...formData, status: e.target.value as any })}
+                    style={inputStyle}
+                  >
+                    <option value="active">Active</option>
+                    <option value="pending">Pending</option>
+                    <option value="cancelled">Cancelled</option>
+                  </select>
+                </FormField>
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+                <FormField label="Next Billing Date">
+                  <input
+                    type="date"
+                    value={formData.nextBilling}
+                    onChange={e => setFormData({ ...formData, nextBilling: e.target.value })}
+                    style={inputStyle}
+                  />
+                </FormField>
+
+                <FormField label="Contract End Date">
+                  <input
+                    type="date"
+                    value={formData.contractEnd}
+                    onChange={e => setFormData({ ...formData, contractEnd: e.target.value })}
+                    style={inputStyle}
+                  />
+                </FormField>
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+                <FormField label="Manager">
+                  <input
+                    type="text"
+                    value={formData.manager}
+                    onChange={e => setFormData({ ...formData, manager: e.target.value })}
+                    style={inputStyle}
+                    placeholder="e.g., John Smith"
+                  />
+                </FormField>
+
+                <FormField label="Renewal Alert (days)">
+                  <input
+                    type="number"
+                    value={formData.renewalAlert}
+                    onChange={e => setFormData({ ...formData, renewalAlert: parseInt(e.target.value) || 30 })}
+                    style={inputStyle}
+                    min={1}
+                    max={90}
+                  />
+                </FormField>
+              </div>
+
+              <FormField label="Auto-Renew">
+                <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}>
+                  <input
+                    type="checkbox"
+                    checked={formData.autoRenew || false}
+                    onChange={e => setFormData({ ...formData, autoRenew: e.target.checked })}
+                  />
+                  <span style={{ fontSize: '14px', color: '#374151' }}>
+                    This subscription auto-renews
+                  </span>
+                </label>
+              </FormField>
+            </div>
           </div>
 
-          <FormField label="Manager">
-            <input
-              type="text"
-              value={formData.manager}
-              onChange={e => setFormData({ ...formData, manager: e.target.value })}
-              style={inputStyle}
-              placeholder="e.g., John Smith"
-            />
-          </FormField>
-
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
-            <FormField label="Status">
-              <select
-                value={formData.status}
-                onChange={e => setFormData({ ...formData, status: e.target.value as any })}
-                style={inputStyle}
-              >
-                <option value="active">Active</option>
-                <option value="pending">Pending</option>
-                <option value="cancelled">Cancelled</option>
-              </select>
-            </FormField>
-
-            <FormField label="Renewal Alert (days)">
-              <input
-                type="number"
-                value={formData.renewalAlert}
-                onChange={e => setFormData({ ...formData, renewalAlert: parseInt(e.target.value) || 30 })}
-                style={inputStyle}
-                min={1}
-                max={90}
-              />
-            </FormField>
-          </div>
-
+          {/* Additional Information */}
           <FormField label="Tags">
             <div style={{ display: 'flex', gap: '8px', marginBottom: '8px' }}>
               <input
@@ -2052,7 +2683,6 @@ const FormModal = ({
               </div>
             )}
           </FormField>
-
           <FormField label="Notes">
             <textarea
               value={formData.notes}
@@ -2089,7 +2719,7 @@ const FormModal = ({
           </button>
           <button
             type="submit"
-            style={{ ...primaryBtn, flex: 1 }}
+            style={{ ...primaryBtn, flex: 1, padding: '10px' }}
             onMouseEnter={e => e.currentTarget.style.background = '#4338CA'}
             onMouseLeave={e => e.currentTarget.style.background = '#4F46E5'}
           >
@@ -2182,7 +2812,7 @@ const DocumentsModal = ({ subscription, onClose, onUpload, onDownload, formatDat
 
         {subscription.attachments && subscription.attachments.length > 0 ? (
           <div style={{ display: 'grid', gap: '12px' }}>
-            {subscription.attachments.map((file: FileAttachment) => (
+            {subscription.attachments.map((file: any) => (
               <div key={file.id} style={{
                 display: 'flex',
                 alignItems: 'center',
@@ -2251,6 +2881,294 @@ const DocumentsModal = ({ subscription, onClose, onUpload, onDownload, formatDat
           </div>
         )}
       </div>
+    </div>
+  </div>
+);
+
+/* =========================
+   Payment History Modal
+   ========================= */
+
+const PaymentHistoryModal = ({ 
+  subscription, 
+  payments, 
+  onClose, 
+  formatDate, 
+  formatCurrency 
+}: any) => (
+  <div style={backdrop} onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+    <div style={modalBox(700)}>
+      <ModalHeader title={`Payment History - ${subscription.service}`} onClose={onClose} />
+      
+      <div style={{ padding: '24px' }}>
+        {/* Summary */}
+        <div style={{
+          background: '#F9FAFB',
+          borderRadius: '8px',
+          padding: '16px',
+          marginBottom: '24px',
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))',
+          gap: '16px'
+        }}>
+          <div>
+            <div style={{ fontSize: '12px', color: '#6B7280', marginBottom: '4px' }}>Total Payments</div>
+            <div style={{ fontSize: '18px', fontWeight: '600', color: '#111827' }}>
+              {payments.length}
+            </div>
+          </div>
+          <div>
+            <div style={{ fontSize: '12px', color: '#6B7280', marginBottom: '4px' }}>Total Paid</div>
+            <div style={{ fontSize: '18px', fontWeight: '600', color: '#111827' }}>
+              {formatCurrency(payments.reduce((sum: number, p: any) => sum + p.amount, 0))}
+            </div>
+          </div>
+          <div>
+            <div style={{ fontSize: '12px', color: '#6B7280', marginBottom: '4px' }}>Last Payment</div>
+            <div style={{ fontSize: '18px', fontWeight: '600', color: '#111827' }}>
+              {payments.length > 0 ? formatDate(payments[0].date) : 'No payments'}
+            </div>
+          </div>
+        </div>
+
+        {/* Payment List */}
+        <div style={{ maxHeight: '400px', overflow: 'auto' }}>
+          {payments.length > 0 ? (
+            <div style={{ display: 'grid', gap: '12px' }}>
+              {payments.map((payment: any, idx: number) => {
+                const statusColors = {
+                  paid: { bg: '#D1FAE5', text: '#065F46' },
+                  pending: { bg: '#FEF3C7', text: '#78350F' },
+                  overdue: { bg: '#FEE2E2', text: '#991B1B' }
+                };
+                const colors = statusColors[payment.status as keyof typeof statusColors] || statusColors.pending;
+
+                return (
+                  <div key={payment.id || idx} style={{
+                    padding: '16px',
+                    border: '1px solid #E5E7EB',
+                    borderRadius: '8px',
+                    background: '#FFFFFF'
+                  }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '8px' }}>
+                      <div>
+                        <div style={{ fontSize: '16px', fontWeight: '600', color: '#111827' }}>
+                          {formatCurrency(payment.amount)}
+                        </div>
+                        <div style={{ fontSize: '14px', color: '#6B7280' }}>
+                          {formatDate(payment.date)}
+                        </div>
+                      </div>
+                      <span style={{
+                        padding: '2px 8px',
+                        borderRadius: '12px',
+                        fontSize: '11px',
+                        fontWeight: '500',
+                        background: colors.bg,
+                        color: colors.text
+                      }}>
+                        {payment.status.toUpperCase()}
+                      </span>
+                    </div>
+                    {payment.invoiceNumber && (
+                      <div style={{ fontSize: '12px', color: '#6B7280' }}>
+                        Invoice: {payment.invoiceNumber}
+                      </div>
+                    )}
+                    {payment.reference && (
+                      <div style={{ fontSize: '12px', color: '#6B7280' }}>
+                        Reference: {payment.reference}
+                      </div>
+                    )}
+                    {payment.method && (
+                      <div style={{ fontSize: '12px', color: '#6B7280' }}>
+                        Method: {payment.method}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <div style={{
+              textAlign: 'center',
+              padding: '48px',
+              color: '#9CA3AF',
+              fontSize: '14px'
+            }}>
+              No payment history available
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  </div>
+);
+
+/* =========================
+   Financial Report Modal
+   ========================= */
+
+const FinancialReportModal = ({ 
+  report, 
+  onClose, 
+  onExport, 
+  formatCurrency 
+}: any) => (
+  <div style={backdrop} onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+    <div style={modalBox(900)}>
+      <ModalHeader title="Financial Report Summary" onClose={onClose} />
+      
+      <div style={{ padding: '24px' }}>
+        {/* Report Period */}
+        <div style={{
+          background: 'linear-gradient(135deg, #4F46E5 0%, #7C3AED 100%)',
+          borderRadius: '8px',
+          padding: '20px',
+          color: '#FFFFFF',
+          marginBottom: '24px'
+        }}>
+          <h3 style={{ fontSize: '20px', fontWeight: '600', marginBottom: '8px' }}>
+            Financial Report - {new Date(report.period).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}
+          </h3>
+          <p style={{ opacity: 0.9, fontSize: '14px' }}>
+            Generated on {new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}
+          </p>
+        </div>
+
+        {/* Key Metrics */}
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
+          gap: '16px',
+          marginBottom: '24px'
+        }}>
+          <MetricBox
+            label="Total Monthly Spend"
+            value={formatCurrency(report.totalSpend)}
+            icon="💰"
+          />
+          <MetricBox
+            label="Projected Annual"
+            value={formatCurrency(report.projectedSpend)}
+            icon="📈"
+          />
+          <MetricBox
+            label="YTD Savings"
+            value={formatCurrency(report.savings)}
+            icon="💵"
+          />
+          <MetricBox
+            label="Budget Utilization"
+            value={`${report.budgetUtilization}%`}
+            icon="📊"
+          />
+        </div>
+
+        {/* Breakdown Charts */}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '20px', marginBottom: '24px' }}>
+          <ChartCard
+            title="By Company"
+            data={report.byCompany}
+            labelKey="company"
+            valueKey="amount"
+            formatCurrency={formatCurrency}
+          />
+          <ChartCard
+            title="By Category"
+            data={report.byCategory}
+            labelKey="category"
+            valueKey="amount"
+            formatCurrency={formatCurrency}
+          />
+          <ChartCard
+            title="By Department"
+            data={report.byDepartment}
+            labelKey="department"
+            valueKey="amount"
+            formatCurrency={formatCurrency}
+          />
+        </div>
+
+        {/* Export Button */}
+        <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+          <button
+            onClick={onExport}
+            style={{
+              padding: '10px 24px',
+              background: '#4F46E5',
+              color: '#FFFFFF',
+              border: 'none',
+              borderRadius: '6px',
+              fontSize: '14px',
+              fontWeight: '500',
+              cursor: 'pointer'
+            }}
+          >
+            Export Full Report
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+);
+
+/* =========================
+   Helper Components for Reports
+   ========================= */
+
+const MetricBox = ({ label, value, icon }: any) => (
+  <div style={{
+    background: '#FFFFFF',
+    border: '1px solid #E5E7EB',
+    borderRadius: '8px',
+    padding: '20px',
+    textAlign: 'center'
+  }}>
+    <div style={{ fontSize: '24px', marginBottom: '8px' }}>{icon}</div>
+    <div style={{ fontSize: '24px', fontWeight: '700', color: '#111827', marginBottom: '4px' }}>
+      {value}
+    </div>
+    <div style={{ fontSize: '14px', color: '#6B7280' }}>
+      {label}
+    </div>
+  </div>
+);
+
+const ChartCard = ({ title, data, labelKey, valueKey, formatCurrency }: any) => (
+  <div style={{
+    background: '#FFFFFF',
+    border: '1px solid #E5E7EB',
+    borderRadius: '8px',
+    padding: '16px'
+  }}>
+    <h4 style={{ fontSize: '14px', fontWeight: '600', color: '#374151', marginBottom: '12px' }}>
+      {title}
+    </h4>
+    <div style={{ display: 'grid', gap: '8px' }}>
+      {data.slice(0, 5).map((item: any) => (
+        <div key={item[labelKey]} style={{ fontSize: '12px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+            <span style={{ color: '#6B7280' }}>{item[labelKey]}</span>
+            <span style={{ fontWeight: '500', color: '#111827' }}>
+              {formatCurrency(item[valueKey])}
+            </span>
+          </div>
+          <div style={{
+            width: '100%',
+            height: '4px',
+            background: '#E5E7EB',
+            borderRadius: '2px',
+            overflow: 'hidden'
+          }}>
+            <div style={{
+              width: `${(item[valueKey] / data[0][valueKey]) * 100}%`,
+              height: '100%',
+              background: '#4F46E5'
+            }} />
+          </div>
+        </div>
+      ))}
     </div>
   </div>
 );
