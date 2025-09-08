@@ -96,39 +96,30 @@ const COMPANIES = ['Kisamos', 'Mizzen', 'Fertmax', 'Shantaram', 'Relia Ship'] as
 const CATEGORIES = [
   'Software',
   'Infrastructure',
-  'Marketing',
-  'Sales',
   'Analytics',
-  'Security',
-  'Communication',
+  'Compliance',
   'HR',
   'Legal',
   'Finance',
   'Operations',
+  'Vessels',
   'Other',
 ] as const;
 
 const DEPARTMENTS = [
-  'Engineering',
-  'Sales',
-  'Marketing',
+  'IT',
   'Finance',
+  'Analytics',
   'HR',
   'Operations',
   'Legal',
   'Executive',
-  'Customer Success',
-  'Product',
 ] as const;
 
 const PAYMENT_METHODS = [
   'Credit Card',
   'Bank Transfer',
   'Invoice',
-  'PayPal',
-  'ACH Transfer',
-  'Wire Transfer',
-  'Check',
   'Other',
 ] as const;
 
