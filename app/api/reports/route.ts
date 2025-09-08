@@ -1,264 +1,119 @@
-import { createClient } from '@supabase/supabase-js'
-import { NextResponse } from 'next/server'
+// app/api/reports/route.ts
+export const runtime = 'edge';
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-)
+import { NextResponse } from 'next/server';
+import { sql } from '@/app/lib/db';
 
-export async function GET(request: Request) {
-  try {
-    const { searchParams } = new URL(request.url)
-    const period = searchParams.get('period') || 'monthly'
-    const startDate = searchParams.get('startDate')
-    const endDate = searchParams.get('endDate')
-    const department = searchParams.get('department')
-    const category = searchParams.get('category')
-
-    // Fetch subscriptions with payments
-    let query = supabase
-      .from('subscriptions')
-      .select(`
-        *,
-        payments (
-          amount,
-          payment_date,
-          status
-        )
-      `)
-
-    if (department) {
-      query = query.eq('department', department)
-    }
-
-    if (category) {
-      query = query.eq('category', category)
-    }
-
-    const { data: subscriptions, error } = await query
-
-    if (error) throw error
-
-    // Process data for reporting
-    const report = generateFinancialReport(subscriptions || [], {
-      period,
-      startDate: startDate || getDefaultStartDate(period),
-      endDate: endDate || new Date().toISOString(),
-    })
-
-    return NextResponse.json(report)
-  } catch (error) {
-    console.error('Error generating report:', error)
-    return NextResponse.json({ error: 'Failed to generate report' }, { status: 500 })
-  }
+function normalizeMonthly(cost: number, billing: 'monthly' | 'yearly' | 'quarterly') {
+  if (billing === 'yearly') return cost / 12;
+  if (billing === 'quarterly') return cost / 3;
+  return cost;
 }
 
-function generateFinancialReport(subscriptions: any[], options: any) {
-  const { period, startDate, endDate } = options
+export async function GET(req: Request) {
+  try {
+    const url = new URL(req.url);
+    const period = url.searchParams.get('period'); // "YYYY-MM"
+    const db = sql();
 
-  // Calculate totals
-  const totalActiveSubscriptions = subscriptions.filter(s => s.status === 'active').length
-  const totalMonthlySpend = subscriptions
-    .filter(s => s.status === 'active')
-    .reduce((sum, s) => sum + (s.cost || 0), 0)
-  
-  const totalAnnualBudget = subscriptions.reduce((sum, s) => sum + (s.budget || 0), 0)
-  
-  // Calculate payments in period
-  const paymentsInPeriod = subscriptions.flatMap(s => 
-    (s.payments || []).filter((p: any) => 
-      p.status === 'completed' &&
-      p.payment_date >= startDate &&
-      p.payment_date <= endDate
-    )
-  )
-  
-  const totalPaidInPeriod = paymentsInPeriod.reduce((sum, p) => sum + p.amount, 0)
+    // Determine month window
+    let start: string;
+    let next: string;
+    if (period && /^\d{4}-\d{2}$/.test(period)) {
+      const [y, m] = period.split('-').map(Number);
+      const s = new Date(Date.UTC(y, m - 1, 1));
+      const e = new Date(Date.UTC(y, m, 1));
+      start = s.toISOString().slice(0, 10);
+      next = e.toISOString().slice(0, 10);
+    } else {
+      const now = new Date();
+      const s = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+      const e = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
+      start = s.toISOString().slice(0, 10);
+      next = e.toISOString().slice(0, 10);
+    }
 
-  // Group by department
-  const departmentBreakdown = subscriptions.reduce((acc, sub) => {
-    const dept = sub.department || 'Unassigned'
-    if (!acc[dept]) {
-      acc[dept] = {
-        count: 0,
-        monthlySpend: 0,
-        annualBudget: 0,
-        paidInPeriod: 0
-      }
-    }
-    
-    acc[dept].count++
-    if (sub.status === 'active') {
-      acc[dept].monthlySpend += sub.cost || 0
-    }
-    acc[dept].annualBudget += sub.budget || 0
-    
-    // Add payments for this subscription in period
-    const subPayments = (sub.payments || [])
-      .filter((p: any) => 
-        p.status === 'completed' &&
-        p.payment_date >= startDate &&
-        p.payment_date <= endDate
+    // Active subscriptions and month-specific variable actuals
+    const subs = await db<{
+      company: string;
+      category: string | null;
+      department: string | null;
+      billing: 'monthly' | 'yearly' | 'quarterly';
+      pricing_type: 'fixed' | 'variable' | null;
+      cost: number;
+      current_month_cost: number | null;
+      budget: number | null;
+      status: string;
+    }[]>`
+      WITH c AS (
+        SELECT subscription_id,
+               MAX(amount) FILTER (
+                 WHERE date_trunc('month', period) = date_trunc('month', ${start}::date)
+               ) AS current_month_cost
+        FROM subscription_costs
+        GROUP BY subscription_id
       )
-      .reduce((sum: number, p: any) => sum + p.amount, 0)
-    
-    acc[dept].paidInPeriod += subPayments
-    
-    return acc
-  }, {} as any)
+      SELECT s.company,
+             s.category,
+             s.department,
+             s.billing,
+             s.pricing_type,
+             (s.cost)::float AS cost,
+             COALESCE((c.current_month_cost)::float, NULL) AS current_month_cost,
+             (s.budget)::float AS budget,
+             s.status
+      FROM subscriptions s
+      LEFT JOIN c ON c.subscription_id = s.id
+      WHERE s.status = 'active';
+    `;
 
-  // Group by category
-  const categoryBreakdown = subscriptions.reduce((acc, sub) => {
-    const cat = sub.category || 'Other'
-    if (!acc[cat]) {
-      acc[cat] = {
-        count: 0,
-        monthlySpend: 0,
-        annualBudget: 0,
-        paidInPeriod: 0
-      }
-    }
-    
-    acc[cat].count++
-    if (sub.status === 'active') {
-      acc[cat].monthlySpend += sub.cost || 0
-    }
-    acc[cat].annualBudget += sub.budget || 0
-    
-    // Add payments for this subscription in period
-    const subPayments = (sub.payments || [])
-      .filter((p: any) => 
-        p.status === 'completed' &&
-        p.payment_date >= startDate &&
-        p.payment_date <= endDate
-      )
-      .reduce((sum: number, p: any) => sum + p.amount, 0)
-    
-    acc[cat].paidInPeriod += subPayments
-    
-    return acc
-  }, {} as any)
+    const rows = subs.map(s => {
+      const monthly =
+        s.pricing_type === 'variable' && typeof s.current_month_cost === 'number'
+          ? s.current_month_cost
+          : normalizeMonthly(s.cost, s.billing);
+      return { ...s, monthly };
+    });
 
-  // Group by vendor
-  const vendorBreakdown = subscriptions.reduce((acc, sub) => {
-    const vendor = sub.vendor || 'Unknown Vendor'
-    if (!acc[vendor]) {
-      acc[vendor] = {
-        count: 0,
-        monthlySpend: 0,
-        totalPaid: 0,
-        subscriptions: []
-      }
-    }
-    
-    acc[vendor].count++
-    if (sub.status === 'active') {
-      acc[vendor].monthlySpend += sub.cost || 0
-    }
-    
-    const totalPaid = (sub.payments || [])
-      .filter((p: any) => p.status === 'completed')
-      .reduce((sum: number, p: any) => sum + p.amount, 0)
-    
-    acc[vendor].totalPaid += totalPaid
-    acc[vendor].subscriptions.push(sub.name)
-    
-    return acc
-  }, {} as any)
+    const totalSpend = rows.reduce((t, r) => t + r.monthly, 0);
+    const by = (key: 'company' | 'category' | 'department') => {
+      const map = new Map<string, number>();
+      rows.forEach(r => {
+        const k = (r[key] || (key === 'category' ? 'Other' : 'Unassigned')) as string;
+        map.set(k, (map.get(k) ?? 0) + r.monthly);
+      });
+      return [...map.entries()]
+        .map(([name, amount]) => ({ [key]: name, amount }))
+        .sort((a, b) => (b as any).amount - (a as any).amount);
+    };
 
-  // Calculate budget utilization
-  const budgetUtilization = totalAnnualBudget > 0 
-    ? (totalPaidInPeriod / totalAnnualBudget) * 100 
-    : 0
+    const byCompany = by('company') as { company: string; amount: number }[];
+    const byCategory = by('category') as { category: string; amount: number }[];
+    const byDepartment = by('department') as { department: string; amount: number }[];
 
-  // Top spending categories
-  const topCategories = Object.entries(categoryBreakdown)
-    .sort((a: any, b: any) => b[1].monthlySpend - a[1].monthlySpend)
-    .slice(0, 5)
-    .map(([name, data]: any) => ({
-      name,
-      monthlySpend: data.monthlySpend,
-      count: data.count
-    }))
+    const paidQ = await db<{ paid: number | null }[]>`
+      SELECT COALESCE(SUM(amount)::float, 0) AS paid
+        FROM payments
+       WHERE date >= ${start}::date
+         AND date <  ${next}::date;
+    `;
+    const paidThisPeriod = paidQ[0]?.paid ?? 0;
 
-  // Top vendors
-  const topVendors = Object.entries(vendorBreakdown)
-    .sort((a: any, b: any) => b[1].totalPaid - a[1].totalPaid)
-    .slice(0, 5)
-    .map(([name, data]: any) => ({
-      name,
-      totalPaid: data.totalPaid,
-      count: data.count
-    }))
+    // Optional: basic budget utilization (sum of budgets/12)
+    const totalBudget = rows.reduce((t, r) => t + (r.budget ?? 0), 0);
+    const budgetUtilization = totalBudget > 0 ? (totalSpend / (totalBudget / 12)) * 100 : 0;
 
-  return {
-    period,
-    dateRange: {
-      start: startDate,
-      end: endDate
-    },
-    summary: {
-      totalActiveSubscriptions,
-      totalMonthlySpend,
-      totalAnnualBudget,
-      totalPaidInPeriod,
+    return NextResponse.json({
+      period: start.slice(0, 7),
+      totalSpend,
+      paidThisPeriod,
+      projectedSpend: totalSpend * 12,
       budgetUtilization,
-      averageCostPerSubscription: totalActiveSubscriptions > 0 
-        ? totalMonthlySpend / totalActiveSubscriptions 
-        : 0
-    },
-    breakdowns: {
-      byDepartment: departmentBreakdown,
-      byCategory: categoryBreakdown,
-      byVendor: vendorBreakdown
-    },
-    topMetrics: {
-      topCategories,
-      topVendors
-    },
-    generatedAt: new Date().toISOString()
-  }
-}
-
-function getDefaultStartDate(period: string): string {
-  const now = new Date()
-  switch (period) {
-    case 'monthly':
-      return new Date(now.getFullYear(), now.getMonth(), 1).toISOString()
-    case 'quarterly':
-      const quarter = Math.floor(now.getMonth() / 3)
-      return new Date(now.getFullYear(), quarter * 3, 1).toISOString()
-    case 'yearly':
-      return new Date(now.getFullYear(), 0, 1).toISOString()
-    default:
-      return new Date(now.getFullYear(), now.getMonth(), 1).toISOString()
-  }
-}
-
-export async function POST(request: Request) {
-  try {
-    const body = await request.json()
-    
-    // Save report for future reference
-    const { data, error } = await supabase
-      .from('financial_reports')
-      .insert([{
-        name: body.name || `Report - ${new Date().toLocaleDateString()}`,
-        period: body.period,
-        start_date: body.startDate,
-        end_date: body.endDate,
-        report_data: body.reportData,
-        created_by: body.createdBy || 'System',
-        created_at: new Date().toISOString()
-      }])
-      .select()
-      .single()
-
-    if (error) throw error
-
-    return NextResponse.json(data)
-  } catch (error) {
-    console.error('Error saving report:', error)
-    return NextResponse.json({ error: 'Failed to save report' }, { status: 500 })
+      byCompany,
+      byCategory,
+      byDepartment,
+    });
+  } catch (err: any) {
+    return NextResponse.json({ ok: false, error: err.message }, { status: 500 });
   }
 }

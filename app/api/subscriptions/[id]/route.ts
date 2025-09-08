@@ -1,109 +1,64 @@
 // app/api/subscriptions/[id]/route.ts
-import { sql } from '@vercel/postgres';
+export const runtime = 'edge';
+
 import { NextResponse } from 'next/server';
+import { sql } from '@/app/lib/db';
 
-export async function PUT(
-  request: Request,
-  { params }: { params: { id: string } }
-) {
+export async function PUT(req: Request, ctx: { params: { id: string } }) {
   try {
-    const id = Number.parseInt(params.id, 10);
-    if (!Number.isFinite(id)) {
-      return NextResponse.json({ error: 'Invalid id' }, { status: 400 });
-    }
+    const id = Number(ctx.params.id);
+    const body = await req.json();
+    const db = sql();
 
-    const body = await request.json();
     const {
-      company,
-      service,
-      cost,
-      billing,
-      nextBilling,
-      contractEnd,
-      category,
-      manager,
-      renewalAlert,
-      status,
-      paymentMethod,
-      notes,
-      tags,
-      lastPaymentStatus,
-      pricingType, // new
-    } = body as {
-      company?: string;
-      service?: string;
-      cost?: number;
-      billing?: 'monthly' | 'yearly' | 'quarterly';
-      nextBilling?: string | null;
-      contractEnd?: string | null;
-      category?: string | null;
-      manager?: string | null;
-      renewalAlert?: number;
-      status?: 'active' | 'pending' | 'cancelled';
-      paymentMethod?: string | null;
-      notes?: string | null;
-      tags?: string[];
-      lastPaymentStatus?: 'paid' | 'pending' | 'overdue';
-      pricingType?: 'fixed' | 'variable';
-    };
+      company, service, cost, billing,
+      nextBilling, contractEnd, category, manager,
+      renewalAlert, status, paymentMethod,
+      tags = [], notes = null,
+      lastPaymentStatus, pricingType,
+      department, costCenter, vendor, accountNumber,
+      autoRenew, budget
+    } = body;
 
-    await sql`
+    await db`
       UPDATE subscriptions
-      SET
-        company = ${company},
-        service = ${service},
-        cost = ${cost},
-        billing = ${billing},
-        next_billing = ${nextBilling || null},
-        contract_end = ${contractEnd || null},
-        category = ${category || null},
-        manager = ${manager || null},
-        renewal_alert = ${renewalAlert ?? 30},
-        status = ${status || 'active'},
-        payment_method = ${paymentMethod || null},
-        notes = ${notes || null},
-        last_payment_status = ${lastPaymentStatus || 'pending'},
-        pricing_type = ${pricingType || 'fixed'},
-        updated_at = NOW()
-      WHERE id = ${id}
+         SET company = ${company},
+             service = ${service},
+             cost = ${cost},
+             billing = ${billing},
+             next_billing = ${nextBilling || null},
+             contract_end = ${contractEnd || null},
+             category = ${category || null},
+             manager = ${manager || null},
+             renewal_alert = ${renewalAlert},
+             status = ${status},
+             payment_method = ${paymentMethod},
+             tags = ${JSON.stringify(tags)}::jsonb,
+             notes = ${notes},
+             last_payment_status = ${lastPaymentStatus},
+             pricing_type = ${pricingType},
+             department = ${department},
+             cost_center = ${costCenter},
+             vendor = ${vendor},
+             account_number = ${accountNumber},
+             auto_renew = ${autoRenew},
+             budget = ${budget}
+       WHERE id = ${id};
     `;
 
-    await sql`DELETE FROM subscription_tags WHERE subscription_id = ${id}`;
-    if (Array.isArray(tags) && tags.length > 0) {
-      for (const tag of tags) {
-        await sql`
-          INSERT INTO subscription_tags (subscription_id, tag)
-          VALUES (${id}, ${tag})
-        `;
-      }
-    }
-
-    return NextResponse.json({ success: true });
-  } catch (error) {
-    console.error('Error updating subscription:', error);
-    return NextResponse.json({ error: 'Failed to update subscription' }, { status: 500 });
+    return NextResponse.json({ ok: true });
+  } catch (err: any) {
+    return NextResponse.json({ ok: false, error: err.message }, { status: 500 });
   }
 }
 
-export async function DELETE(
-  _request: Request,
-  { params }: { params: { id: string } }
-) {
+export async function DELETE(_req: Request, ctx: { params: { id: string } }) {
   try {
-    const id = Number.parseInt(params.id, 10);
-    if (!Number.isFinite(id)) {
-      return NextResponse.json({ error: 'Invalid id' }, { status: 400 });
-    }
-
-    await sql`DELETE FROM payments WHERE subscription_id = ${id}`;
-    await sql`DELETE FROM attachments WHERE subscription_id = ${id}`;
-    await sql`DELETE FROM subscription_tags WHERE subscription_id = ${id}`;
-    await sql`DELETE FROM subscription_costs WHERE subscription_id = ${id}`;
-    await sql`DELETE FROM subscriptions WHERE id = ${id}`;
-
-    return NextResponse.json({ success: true });
-  } catch (error) {
-    console.error('Error deleting subscription:', error);
-    return NextResponse.json({ error: 'Failed to delete subscription' }, { status: 500 });
+    const id = Number(ctx.params.id);
+    const db = sql();
+    await db`DELETE FROM subscriptions WHERE id = ${id};`;
+    return NextResponse.json({ ok: true });
+  } catch (err: any) {
+    return NextResponse.json({ ok: false, error: err.message }, { status: 500 });
   }
 }
