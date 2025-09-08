@@ -35,70 +35,103 @@ type Row = {
   attachment_count: number;
 };
 
-e// app/api/subscriptions/route.ts
-import { NextResponse } from 'next/server';
-import { sql } from '@vercel/postgres';
-
-export const dynamic = 'force-dynamic';
-
-// ... your existing GET here ...
-
-export async function POST(req: Request) {
+export async function GET() {
   try {
-    const body = await req.json();
-
-    // Required
-    const company = String(body.company || '').trim();
-    const service = String(body.service || '').trim();
-    const cost = Number(body.cost);
-    const billing: 'monthly' | 'quarterly' | 'yearly' =
-      body.billing === 'yearly' || body.billing === 'quarterly' ? body.billing : 'monthly';
-
-    if (!company || !service || !Number.isFinite(cost)) {
-      return NextResponse.json({ error: 'Missing or invalid fields (company, service, cost)' }, { status: 400 });
-    }
-
-    // Optional / normalized
-    const nextBilling = body.nextBilling ? new Date(body.nextBilling) : null;
-    const contractEnd = body.contractEnd ? new Date(body.contractEnd) : null;
-    const category = body.category ?? null;
-    const manager = body.manager ?? null;
-    const renewalAlert = Number.isFinite(Number(body.renewalAlert)) ? Number(body.renewalAlert) : 30;
-    const status: 'active' | 'pending' | 'cancelled' =
-      body.status === 'pending' || body.status === 'cancelled' ? body.status : 'active';
-    const paymentMethod = body.paymentMethod ?? null;
-    const tags: string[] | null = Array.isArray(body.tags) ? body.tags : null;
-    const notes = body.notes ?? null;
-    const pricingType: 'fixed' | 'variable' = body.pricingType === 'variable' ? 'variable' : 'fixed';
-    const department = body.department ?? null;
-    const costCenter = body.costCenter ?? null;
-    const vendor = body.vendor ?? null;
-    const accountNumber = body.accountNumber ?? null;
-    const autoRenew = !!body.autoRenew;
-    const budget = Number.isFinite(Number(body.budget)) ? Number(body.budget) : null;
-    const lastPaymentStatus: 'paid' | 'pending' | 'overdue' =
-      body.lastPaymentStatus === 'paid' || body.lastPaymentStatus === 'overdue'
-        ? body.lastPaymentStatus
-        : 'pending';
-
-    const { rows } = await sql<{ id: number }>`
-      INSERT INTO subscriptions (
-        company, service, cost, billing, next_billing, contract_end,
-        category, manager, renewal_alert, status, payment_method, tags, notes,
-        pricing_type, department, cost_center, vendor, account_number,
-        auto_renew, budget, last_payment_status
-      ) VALUES (
-        ${company}, ${service}, ${cost}, ${billing}, ${nextBilling}, ${contractEnd},
-        ${category}, ${manager}, ${renewalAlert}, ${status}, ${paymentMethod}, ${tags}, ${notes},
-        ${pricingType}, ${department}, ${costCenter}, ${vendor}, ${accountNumber},
-        ${autoRenew}, ${budget}, ${lastPaymentStatus}
+    const { rows } = await sql<Row>`
+      WITH cost_history AS (
+        SELECT 
+          subscription_id,
+          json_agg(
+            json_build_object(
+              'period', to_char(period, 'YYYY-MM-DD'),
+              'amount', amount::float
+            ) ORDER BY period DESC
+          ) AS history,
+          MAX(amount) FILTER (WHERE date_trunc('month', period) = date_trunc('month', CURRENT_DATE)) AS current_month,
+          MAX(amount) FILTER (WHERE date_trunc('month', period) = date_trunc('month', CURRENT_DATE - INTERVAL '1 month')) AS last_month
+        FROM subscription_costs
+        GROUP BY subscription_id
+      ),
+      payment_history AS (
+        SELECT 
+          subscription_id,
+          json_agg(
+            json_build_object(
+              'id', id,
+              'date', to_char(payment_date, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+              'amount', amount::float,
+              'status', status,
+              'method', method,
+              'reference', reference
+            ) ORDER BY payment_date DESC
+          ) AS payments
+        FROM payments
+        GROUP BY subscription_id
       )
-      RETURNING id;
+      SELECT 
+        s.id,
+        s.company,
+        s.service,
+        s.cost,
+        s.billing,
+        to_char(s.next_billing, 'YYYY-MM-DD') AS "nextBilling",
+        to_char(s.contract_end, 'YYYY-MM-DD') AS "contractEnd",
+        s.category,
+        s.manager,
+        s.renewal_alert AS "renewalAlert",
+        s.status,
+        s.payment_method AS "paymentMethod",
+        s.tags,
+        s.notes,
+        s.pricing_type AS "pricingType",
+        ch.current_month::float AS "currentMonthCost",
+        ch.last_month::float AS "lastMonthCost",
+        COALESCE(ch.history, '[]'::json) AS "costHistory",
+        s.last_payment_status AS "lastPaymentStatus",
+        COALESCE(ph.payments, '[]'::json) AS payments,
+        0 AS attachment_count
+      FROM subscriptions s
+      LEFT JOIN cost_history ch ON ch.subscription_id = s.id
+      LEFT JOIN payment_history ph ON ph.subscription_id = s.id
+      ORDER BY s.id DESC
     `;
 
-    return NextResponse.json({ id: rows[0].id }, { status: 201 });
-  } catch (err) {
-    console.error('subscriptions POST error', err);
-    return NextResponse.json({ error: 'Failed to create subscription' }, { status: 500 });
+    return NextResponse.json(rows);
+  } catch (error) {
+    console.error('Failed to fetch subscriptions:', error);
+    return NextResponse.json(
+      { error: 'Failed to fetch subscriptions' },
+      { status: 500 }
+    );
+  }
+}
+
+export async function POST(request: Request) {
+  try {
+    const body = await request.json();
+    
+    const result = await sql`
+      INSERT INTO subscriptions (
+        company, service, cost, billing, next_billing, contract_end,
+        category, manager, renewal_alert, status, payment_method,
+        tags, notes, pricing_type, last_payment_status
+      ) VALUES (
+        ${body.company}, ${body.service}, ${body.cost}, ${body.billing},
+        ${body.nextBilling || null}, ${body.contractEnd || null},
+        ${body.category || null}, ${body.manager || null},
+        ${body.renewalAlert || 30}, ${body.status}, ${body.paymentMethod},
+        ${JSON.stringify(body.tags || [])}, ${body.notes || null},
+        ${body.pricingType || 'fixed'}, ${body.lastPaymentStatus || 'pending'}
+      )
+      RETURNING id
+    `;
+
+    return NextResponse.json({ id: result.rows[0].id });
+  } catch (error) {
+    console.error('Failed to create subscription:', error);
+    return NextResponse.json(
+      { error: 'Failed to create subscription' },
+      { status: 500 }
+    );
   }
 }
