@@ -9,44 +9,7 @@ export async function GET() {
     const db = sql();
 
     // Aggregate cost history + current month, plus payments
-    const rows = await db<{
-      id: number;
-      company: string;
-      service: string;
-      cost: number;
-      billing: 'monthly' | 'yearly' | 'quarterly';
-      nextBilling: string | null;
-      contractEnd: string | null;
-      category: string | null;
-      manager: string | null;
-      renewalAlert: number;
-      status: 'active' | 'pending' | 'cancelled';
-      paymentMethod: string;
-      tags: string[] | null;
-      notes: string | null;
-      lastPaymentStatus: 'paid' | 'pending' | 'overdue' | null;
-      pricingType: 'fixed' | 'variable' | null;
-      department: string | null;
-      costCenter: string | null;
-      vendor: string | null;
-      accountNumber: string | null;
-      autoRenew: boolean | null;
-      budget: number | null;
-      currentMonthCost: number | null;
-      lastMonthCost: number | null;
-      costHistory: { period: string; amount: number }[];
-      attachment_count: number;
-      payments: {
-        id: string;
-        date: string;
-        amount: number;
-        status: 'paid' | 'pending' | 'overdue';
-        method: string | null;
-        reference: string | null;
-        invoiceNumber: string | null;
-        notes: string | null;
-      }[];
-    }[]>`
+    const rows = await db`
       WITH costs AS (
         SELECT
           subscription_id,
@@ -143,7 +106,7 @@ export async function POST(req: Request) {
       autoRenew = false, budget = null,
     } = body;
 
-    const inserted = await db<{ id: number }[]>`
+    const inserted = await db`
       INSERT INTO subscriptions (
         company, service, cost, billing,
         next_billing, contract_end, category, manager,
