@@ -1,119 +1,135 @@
 // app/api/reports/route.ts
-export const runtime = 'edge';
-
 import { NextResponse } from 'next/server';
-import { sql } from '@/app/lib/db';
+import { sql } from '@vercel/postgres';
 
-function normalizeMonthly(cost: number, billing: 'monthly' | 'yearly' | 'quarterly') {
-  if (billing === 'yearly') return cost / 12;
-  if (billing === 'quarterly') return cost / 3;
-  return cost;
-}
+// Utility
+const startOfMonth = (d: Date) => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1));
+const endOfMonth = (d: Date) => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0));
 
 export async function GET(req: Request) {
   try {
-    const url = new URL(req.url);
-    const period = url.searchParams.get('period'); // "YYYY-MM"
-    const db = sql();
+    const { searchParams } = new URL(req.url);
+    const fromParam = searchParams.get('from'); // ISO date
+    const toParam = searchParams.get('to');     // ISO date
+    const company = searchParams.get('company');
+    const category = searchParams.get('category');
 
-    // Determine month window
-    let start: string;
-    let next: string;
-    if (period && /^\d{4}-\d{2}$/.test(period)) {
-      const [y, m] = period.split('-').map(Number);
-      const s = new Date(Date.UTC(y, m - 1, 1));
-      const e = new Date(Date.UTC(y, m, 1));
-      start = s.toISOString().slice(0, 10);
-      next = e.toISOString().slice(0, 10);
-    } else {
-      const now = new Date();
-      const s = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
-      const e = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
-      start = s.toISOString().slice(0, 10);
-      next = e.toISOString().slice(0, 10);
-    }
+    const now = new Date();
+    const defFrom = startOfMonth(new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 11, 1)));
+    const defTo = endOfMonth(now);
 
-    // Active subscriptions and month-specific variable actuals
-    const subs = await db<{
-      company: string;
-      category: string | null;
-      department: string | null;
-      billing: 'monthly' | 'yearly' | 'quarterly';
-      pricing_type: 'fixed' | 'variable' | null;
-      cost: number;
-      current_month_cost: number | null;
-      budget: number | null;
-      status: string;
-    }[]>`
-      WITH c AS (
-        SELECT subscription_id,
-               MAX(amount) FILTER (
-                 WHERE date_trunc('month', period) = date_trunc('month', ${start}::date)
-               ) AS current_month_cost
-        FROM subscription_costs
-        GROUP BY subscription_id
-      )
-      SELECT s.company,
-             s.category,
-             s.department,
-             s.billing,
-             s.pricing_type,
-             (s.cost)::float AS cost,
-             COALESCE((c.current_month_cost)::float, NULL) AS current_month_cost,
-             (s.budget)::float AS budget,
-             s.status
+    const from = (fromParam ? new Date(fromParam) : defFrom).toISOString();
+    const to = (toParam ? new Date(toParam) : defTo).toISOString();
+
+    // Summary totals by payment status
+    const { rows: summaryRows } = await sql<{
+      paid: string | number;
+      pending: string | number;
+      overdue: string | number;
+    }>`
+      SELECT
+        COALESCE(SUM(CASE WHEN p.status='paid' THEN p.amount ELSE 0 END),0)   AS paid,
+        COALESCE(SUM(CASE WHEN p.status='pending' THEN p.amount ELSE 0 END),0) AS pending,
+        COALESCE(SUM(CASE WHEN p.status='overdue' THEN p.amount ELSE 0 END),0) AS overdue
+      FROM payments p
+      JOIN subscriptions s ON s.id = p.subscription_id
+      WHERE p.payment_date >= ${from}::timestamptz
+        AND p.payment_date <= ${to}::timestamptz
+        ${company ? sql`AND s.company = ${company}` : sql``}
+        ${category ? sql`AND s.category = ${category}` : sql``}
+    `;
+    const summary = summaryRows[0] || { paid: 0, pending: 0, overdue: 0 };
+
+    // Run-rate & counts from active/pending subs
+    const { rows: runRateRows } = await sql<{
+      run_rate: string | number;
+      active_count: number;
+      vendors: number;
+    }>`
+      SELECT
+        COALESCE(SUM(
+          CASE s.billing
+            WHEN 'monthly' THEN s.cost
+            WHEN 'quarterly' THEN s.cost / 3
+            WHEN 'yearly' THEN s.cost / 12
+          END
+        ), 0) AS run_rate,
+        COUNT(*) FILTER (WHERE s.status = 'active') AS active_count,
+        COUNT(DISTINCT s.service) AS vendors
       FROM subscriptions s
-      LEFT JOIN c ON c.subscription_id = s.id
-      WHERE s.status = 'active';
+      WHERE s.status IN ('active','pending')
+    `;
+    const run = runRateRows[0] || { run_rate: 0, active_count: 0, vendors: 0 };
+
+    // By month
+    const byMonth = await sql<{
+      period: string;
+      paid: string | number;
+      pending: string | number;
+      overdue: string | number;
+    }>`
+      SELECT
+        DATE_TRUNC('month', p.payment_date)::date AS period,
+        COALESCE(SUM(CASE WHEN p.status='paid' THEN p.amount ELSE 0 END),0) AS paid,
+        COALESCE(SUM(CASE WHEN p.status='pending' THEN p.amount ELSE 0 END),0) AS pending,
+        COALESCE(SUM(CASE WHEN p.status='overdue' THEN p.amount ELSE 0 END),0) AS overdue
+      FROM payments p
+      JOIN subscriptions s ON s.id = p.subscription_id
+      WHERE p.payment_date >= ${from}::timestamptz
+        AND p.payment_date <= ${to}::timestamptz
+        ${company ? sql`AND s.company = ${company}` : sql``}
+        ${category ? sql`AND s.category = ${category}` : sql``}
+      GROUP BY 1
+      ORDER BY 1
     `;
 
-    const rows = subs.map(s => {
-      const monthly =
-        s.pricing_type === 'variable' && typeof s.current_month_cost === 'number'
-          ? s.current_month_cost
-          : normalizeMonthly(s.cost, s.billing);
-      return { ...s, monthly };
-    });
-
-    const totalSpend = rows.reduce((t, r) => t + r.monthly, 0);
-    const by = (key: 'company' | 'category' | 'department') => {
-      const map = new Map<string, number>();
-      rows.forEach(r => {
-        const k = (r[key] || (key === 'category' ? 'Other' : 'Unassigned')) as string;
-        map.set(k, (map.get(k) ?? 0) + r.monthly);
-      });
-      return [...map.entries()]
-        .map(([name, amount]) => ({ [key]: name, amount }))
-        .sort((a, b) => (b as any).amount - (a as any).amount);
-    };
-
-    const byCompany = by('company') as { company: string; amount: number }[];
-    const byCategory = by('category') as { category: string; amount: number }[];
-    const byDepartment = by('department') as { department: string; amount: number }[];
-
-    const paidQ = await db<{ paid: number | null }[]>`
-      SELECT COALESCE(SUM(amount)::float, 0) AS paid
-        FROM payments
-       WHERE date >= ${start}::date
-         AND date <  ${next}::date;
+    // By company
+    const byCompany = await sql<{ company: string; paid: string | number }>`
+      SELECT s.company, COALESCE(SUM(CASE WHEN p.status='paid' THEN p.amount ELSE 0 END),0) AS paid
+      FROM payments p
+      JOIN subscriptions s ON s.id = p.subscription_id
+      WHERE p.payment_date >= ${from}::timestamptz
+        AND p.payment_date <= ${to}::timestamptz
+        ${company ? sql`AND s.company = ${company}` : sql``}
+        ${category ? sql`AND s.category = ${category}` : sql``}
+      GROUP BY s.company
+      ORDER BY paid DESC
     `;
-    const paidThisPeriod = paidQ[0]?.paid ?? 0;
 
-    // Optional: basic budget utilization (sum of budgets/12)
-    const totalBudget = rows.reduce((t, r) => t + (r.budget ?? 0), 0);
-    const budgetUtilization = totalBudget > 0 ? (totalSpend / (totalBudget / 12)) * 100 : 0;
+    // By category
+    const byCategory = await sql<{ category: string | null; paid: string | number }>`
+      SELECT s.category, COALESCE(SUM(CASE WHEN p.status='paid' THEN p.amount ELSE 0 END),0) AS paid
+      FROM payments p
+      JOIN subscriptions s ON s.id = p.subscription_id
+      WHERE p.payment_date >= ${from}::timestamptz
+        AND p.payment_date <= ${to}::timestamptz
+        ${company ? sql`AND s.company = ${company}` : sql``}
+        ${category ? sql`AND s.category = ${category}` : sql``}
+      GROUP BY s.category
+      ORDER BY paid DESC
+    `;
 
     return NextResponse.json({
-      period: start.slice(0, 7),
-      totalSpend,
-      paidThisPeriod,
-      projectedSpend: totalSpend * 12,
-      budgetUtilization,
-      byCompany,
-      byCategory,
-      byDepartment,
+      params: { from, to, company, category },
+      summary: {
+        totalPaid: Number(summary.paid) || 0,
+        totalPending: Number(summary.pending) || 0,
+        totalOverdue: Number(summary.overdue) || 0,
+        monthlyRunRate: Number(run.run_rate) || 0,
+        activeSubscriptions: Number(run.active_count) || 0,
+        vendors: Number(run.vendors) || 0,
+      },
+      byMonth: byMonth.rows.map(r => ({
+        period: r.period,
+        paid: Number(r.paid),
+        pending: Number(r.pending),
+        overdue: Number(r.overdue),
+      })),
+      byCompany: byCompany.rows.map(r => ({ company: r.company, paid: Number(r.paid) })),
+      byCategory: byCategory.rows.map(r => ({ category: r.category || 'Uncategorized', paid: Number(r.paid) })),
     });
-  } catch (err: any) {
-    return NextResponse.json({ ok: false, error: err.message }, { status: 500 });
+  } catch (err) {
+    console.error('reports error', err);
+    return NextResponse.json({ error: 'Failed to build report' }, { status: 500 });
   }
 }

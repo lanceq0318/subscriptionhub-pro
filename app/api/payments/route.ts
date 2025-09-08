@@ -1,55 +1,83 @@
-// app/api/payments/route.ts
-export const runtime = 'edge';
-
+// app/api/db/init/route.ts
 import { NextResponse } from 'next/server';
-import { sql } from '@/app/lib/db';
+import { sql } from '@vercel/postgres';
 
-type Payment = {
-  date: string;
-  amount: number;
-  status: 'paid' | 'pending' | 'overdue';
-  method?: string;
-  reference?: string;
-  invoiceNumber?: string;
-  notes?: string;
-};
-
-export async function POST(req: Request) {
+export async function POST() {
   try {
-    const { subscriptionId, payment } = (await req.json()) as {
-      subscriptionId: number;
-      payment: Payment;
-    };
-
-    if (!subscriptionId || !payment) {
-      return NextResponse.json({ error: 'subscriptionId and payment are required' }, { status: 400 });
-    }
-
-    const db = sql();
-
-    await db`
-      INSERT INTO payments (
-        subscription_id, date, amount, status, method, reference, invoice_number, notes
-      ) VALUES (
-        ${subscriptionId},
-        ${payment.date},
-        ${payment.amount},
-        ${payment.status},
-        ${payment.method || null},
-        ${payment.reference || null},
-        ${payment.invoiceNumber || null},
-        ${payment.notes || null}
+    // subscriptions
+    await sql`
+      CREATE TABLE IF NOT EXISTS subscriptions (
+        id                  SERIAL PRIMARY KEY,
+        company             TEXT NOT NULL,
+        service             TEXT NOT NULL,
+        cost                NUMERIC NOT NULL,
+        billing             TEXT NOT NULL CHECK (billing IN ('monthly','yearly','quarterly')),
+        next_billing        DATE,
+        contract_end        DATE,
+        category            TEXT,
+        manager             TEXT,
+        renewal_alert       INT NOT NULL DEFAULT 30,
+        status              TEXT NOT NULL CHECK (status IN ('active','pending','cancelled')),
+        payment_method      TEXT NOT NULL,
+        tags                JSONB NOT NULL DEFAULT '[]'::jsonb,
+        notes               TEXT,
+        last_payment_status TEXT CHECK (last_payment_status IN ('paid','pending','overdue')),
+        pricing_type        TEXT CHECK (pricing_type IN ('fixed','variable')),
+        current_month_cost  NUMERIC,
+        last_month_cost     NUMERIC,
+        department          TEXT,
+        cost_center         TEXT,
+        vendor              TEXT,
+        account_number      TEXT,
+        auto_renew          BOOLEAN DEFAULT FALSE,
+        budget              NUMERIC
       );
     `;
 
-    await db`
-      UPDATE subscriptions
-         SET last_payment_status = ${payment.status}
-       WHERE id = ${subscriptionId};
+    // payments (column name = payment_date to match the rest of your code)
+    await sql`
+      CREATE TABLE IF NOT EXISTS payments (
+        id               BIGSERIAL PRIMARY KEY,
+        subscription_id  INT NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
+        payment_date     TIMESTAMPTZ NOT NULL DEFAULT now(),
+        amount           NUMERIC NOT NULL,
+        status           TEXT NOT NULL CHECK (status IN ('paid','pending','overdue')),
+        method           TEXT,
+        reference        TEXT,
+        invoice_number   TEXT,
+        notes            TEXT
+      );
+    `;
+
+    // monthly actuals (variable/fixed)
+    await sql`
+      CREATE TABLE IF NOT EXISTS subscription_costs (
+        id               BIGSERIAL PRIMARY KEY,
+        subscription_id  INT NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
+        period           DATE NOT NULL,
+        amount           NUMERIC NOT NULL,
+        source           TEXT,
+        UNIQUE(subscription_id, period)
+      );
+    `;
+
+    // attachments (for Documents count / future uploads)
+    await sql`
+      CREATE TABLE IF NOT EXISTS attachments (
+        id               BIGSERIAL PRIMARY KEY,
+        subscription_id  INT NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
+        name             TEXT NOT NULL,
+        type             TEXT,                 -- 'contract' | 'invoice' | 'other'
+        size             BIGINT,
+        mime_type        TEXT,
+        uploaded_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+        url              TEXT                  -- optional external storage URL
+      );
     `;
 
     return NextResponse.json({ ok: true });
-  } catch (err: any) {
-    return NextResponse.json({ ok: false, error: err.message }, { status: 500 });
+  } catch (err) {
+    console.error('init error', err);
+    return NextResponse.json({ error: 'Failed to init database' }, { status: 500 });
   }
 }
