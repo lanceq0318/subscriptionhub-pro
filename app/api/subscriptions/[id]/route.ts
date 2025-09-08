@@ -51,6 +51,12 @@ export async function PUT(
       notes,
       pricingType,
       lastPaymentStatus,
+      department,
+      costCenter,
+      vendor,
+      accountNumber,
+      autoRenew,
+      budget,
     } = body;
 
     // Convert dates to strings or null
@@ -74,7 +80,13 @@ export async function PUT(
         tags=${JSON.stringify(tags || [])},
         notes=${notes},
         pricing_type=${pricingType || 'fixed'},
-        last_payment_status=${lastPaymentStatus}
+        last_payment_status=${lastPaymentStatus},
+        department=${department},
+        cost_center=${costCenter},
+        vendor=${vendor},
+        account_number=${accountNumber},
+        auto_renew=${autoRenew},
+        budget=${budget}
       WHERE id = ${params.id}
     `;
 
@@ -94,4 +106,16 @@ export async function DELETE(
 ) {
   try {
     await sql`
-      DELETE FROM subscription
+      DELETE FROM subscriptions 
+      WHERE id = ${params.id}
+    `;
+    
+    return NextResponse.json({ success: true });
+  } catch (error) {
+    console.error('Failed to delete subscription:', error);
+    return NextResponse.json(
+      { error: 'Failed to delete subscription' },
+      { status: 500 }
+    );
+  }
+}
