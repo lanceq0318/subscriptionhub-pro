@@ -2,7 +2,7 @@
 export const api = {
   async getSubscriptions() {
     const res = await fetch('/api/subscriptions', { cache: 'no-store' });
-    if (!res.ok) throw new Error('Failed to load subscriptions');
+    if (!res.ok) throw new Error(await res.text());
     return res.json();
   },
 
@@ -32,29 +32,50 @@ export const api = {
     return res.json();
   },
 
+  async getPayments(subscriptionId: number) {
+    const res = await fetch(`/api/subscriptions/${subscriptionId}/payments`, { cache: 'no-store' });
+    if (!res.ok) throw new Error(await res.text());
+    return res.json();
+  },
+
   async markAsPaid(subscriptionId: number, payment: any) {
-    const res = await fetch('/api/payments', {
+    const res = await fetch(`/api/subscriptions/${subscriptionId}/payments`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ subscriptionId, payment }),
+      body: JSON.stringify(payment),
     });
     if (!res.ok) throw new Error(await res.text());
     return res.json();
   },
 
+  // (if you added the finance endpoint previously)
+  async getFinanceReport(params: {
+    from?: string; to?: string; company?: string; category?: string; groupBy?: 'month'|'company'|'category'|'service';
+  }) {
+    const qs = new URLSearchParams(
+      Object.fromEntries(Object.entries(params).filter(([, v]) => v != null))
+    ).toString();
+    const res = await fetch(`/api/reports/finance?${qs}`, { cache: 'no-store' });
+    if (!res.ok) throw new Error(await res.text());
+    return res.json();
+  },
+
+  downloadFinanceReportCSV(params: {
+    from?: string; to?: string; company?: string; category?: string; groupBy?: 'month'|'company'|'category'|'service';
+  }) {
+    const qs = new URLSearchParams(
+      Object.fromEntries(Object.entries({ ...params, format: 'csv' }).filter(([, v]) => v != null))
+    ).toString();
+    window.location.href = `/api/reports/finance?${qs}`;
+  },
+
+  // If your code calls this for variable-cost logging
   async upsertSubscriptionCost(subscriptionId: number, payload: { period: string; amount: number; source?: string }) {
-    const res = await fetch('/api/costs', {
+    const res = await fetch(`/api/subscriptions/${subscriptionId}/costs`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ subscriptionId, ...payload }),
+      body: JSON.stringify(payload),
     });
-    if (!res.ok) throw new Error(await res.text());
-    return res.json();
-  },
-
-  async getFinancialReport(period?: string) {
-    const qs = period ? `?period=${encodeURIComponent(period)}` : '';
-    const res = await fetch(`/api/reports${qs}`, { cache: 'no-store' });
     if (!res.ok) throw new Error(await res.text());
     return res.json();
   },
