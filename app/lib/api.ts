@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 // app/lib/api.ts
 export type Payment = {
   id?: string;
@@ -9,41 +10,45 @@ export type Payment = {
   reference?: string;
 };
 
+=======
+>>>>>>> parent of fdb4560 (Imporvement)
 export const api = {
   async getSubscriptions() {
-    const res = await fetch('/api/subscriptions', { cache: 'no-store' });
+    const res = await fetch('/api/subscriptions');
     if (!res.ok) throw new Error('Failed to fetch subscriptions');
     return res.json();
   },
 
-  async createSubscription(payload: any) {
+  async createSubscription(data: any) {
     const res = await fetch('/api/subscriptions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+      body: JSON.stringify(data),
     });
     if (!res.ok) throw new Error('Failed to create subscription');
     return res.json();
   },
 
-  async updateSubscription(id: number, payload: any) {
+  async updateSubscription(id: number, data: any) {
     const res = await fetch(`/api/subscriptions/${id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+      body: JSON.stringify(data),
     });
     if (!res.ok) throw new Error('Failed to update subscription');
     return res.json();
   },
 
   async deleteSubscription(id: number) {
-    const res = await fetch(`/api/subscriptions/${id}`, { method: 'DELETE' });
+    const res = await fetch(`/api/subscriptions/${id}`, {
+      method: 'DELETE',
+    });
     if (!res.ok) throw new Error('Failed to delete subscription');
     return res.json();
   },
 
-  async markAsPaid(id: number, payment: Payment) {
-    const res = await fetch(`/api/subscriptions/${id}/pay`, {
+  async markAsPaid(id: number, payment: any) {
+    const res = await fetch(`/api/subscriptions/${id}/payment`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payment),
@@ -51,6 +56,7 @@ export const api = {
     if (!res.ok) throw new Error('Failed to mark as paid');
     return res.json();
   },
+<<<<<<< HEAD
 
   // ===== Variable costs =====
   async getSubscriptionCosts(id: number) {
@@ -77,3 +83,6 @@ export const api = {
     return res.json();
   },
 };
+=======
+};
+>>>>>>> parent of fdb4560 (Imporvement)

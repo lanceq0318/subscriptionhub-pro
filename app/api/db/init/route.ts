@@ -6,6 +6,7 @@ import { sql } from '@/app/lib/db';
 
 export async function POST() {
   try {
+<<<<<<< HEAD
     const db = sql();
 
     // subscriptions
@@ -38,6 +39,56 @@ export async function POST() {
 
     // payments
     await db`
+=======
+    // Create subscriptions table
+    await sql`
+      CREATE TABLE IF NOT EXISTS subscriptions (
+        id SERIAL PRIMARY KEY,
+        company VARCHAR(50) NOT NULL,
+        service VARCHAR(255) NOT NULL,
+        cost DECIMAL(10, 2) NOT NULL,
+        billing VARCHAR(20) NOT NULL,
+        next_billing DATE,
+        contract_end DATE,
+        category VARCHAR(50),
+        manager VARCHAR(100),
+        renewal_alert INTEGER DEFAULT 30,
+        status VARCHAR(20) DEFAULT 'active',
+        payment_method VARCHAR(50),
+        usage INTEGER,
+        notes TEXT,
+        last_payment_status VARCHAR(20) DEFAULT 'pending',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `;
+
+    // Create tags table
+    await sql`
+      CREATE TABLE IF NOT EXISTS subscription_tags (
+        id SERIAL PRIMARY KEY,
+        subscription_id INTEGER REFERENCES subscriptions(id) ON DELETE CASCADE,
+        tag VARCHAR(50) NOT NULL
+      );
+    `;
+
+    // Create attachments table
+    await sql`
+      CREATE TABLE IF NOT EXISTS attachments (
+        id SERIAL PRIMARY KEY,
+        subscription_id INTEGER REFERENCES subscriptions(id) ON DELETE CASCADE,
+        name VARCHAR(255) NOT NULL,
+        type VARCHAR(50),
+        size INTEGER,
+        mime_type VARCHAR(100),
+        data TEXT,
+        upload_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `;
+
+    // Create payments table
+    await sql`
+>>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
       CREATE TABLE IF NOT EXISTS payments (
         id               BIGSERIAL PRIMARY KEY,
         subscription_id  INT NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
@@ -51,6 +102,7 @@ export async function POST() {
       );
     `;
 
+<<<<<<< HEAD
     // per-month actuals for variable/fixed subs
     await db`
       CREATE TABLE IF NOT EXISTS subscription_costs (
@@ -69,5 +121,11 @@ export async function POST() {
     return NextResponse.json({ ok: true, created: true });
   } catch (err: any) {
     return NextResponse.json({ ok: false, error: err.message }, { status: 500 });
+=======
+    return NextResponse.json({ message: 'Database initialized successfully' });
+  } catch (error) {
+    console.error('Database initialization error:', error);
+    return NextResponse.json({ error: 'Failed to initialize database' }, { status: 500 });
+>>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
   }
 }
