@@ -1,7 +1,7 @@
 'use client';
 
-import { useSession, signOut } from 'next-auth/react';
-import { useRouter } from 'next/navigation';
+import { useSession } from 'next-auth/react';
+import { signOut } from 'next-auth/react';
 import { api } from '@/app/lib/api';
 import {
   useEffect,
@@ -10,10 +10,9 @@ import {
   type FormEventHandler,
   type ChangeEvent,
 } from 'react';
+import { useRouter } from 'next/navigation';
 
-/* =========================
-   Types
-   ========================= */
+type SubscriptionForm = Omit<Subscription, 'id' | 'cost'> & { cost: string };
 
 type FileAttachment = {
   id: string;
@@ -21,12 +20,12 @@ type FileAttachment = {
   type: 'contract' | 'invoice' | 'other';
   size: number;
   uploadDate: string;
-  data: string;        // data URL (base64)
+  data: string;
   mimeType: string;
 };
 
 type Payment = {
-  id?: string;
+  id: string;
   date: string;
   amount: number;
   status: 'paid' | 'pending' | 'overdue';
@@ -48,23 +47,15 @@ type Subscription = {
   renewalAlert: number;
   status: 'active' | 'pending' | 'cancelled';
   paymentMethod: string;
+  usage?: number;
   tags?: string[];
   notes?: string;
   attachments?: FileAttachment[];
   payments?: Payment[];
   lastPaymentStatus?: 'paid' | 'pending' | 'overdue';
-  /** returned by GET aggregator */
-  attachment_count?: number;
 };
 
-type SubscriptionForm = Omit<Subscription, 'id' | 'cost' | 'attachment_count'> & { cost: string };
-
-/* =========================
-   Constants
-   ========================= */
-
 const COMPANIES = ['Kisamos', 'Mizzen', 'Fertmax'] as const;
-
 const CATEGORIES = [
   'Software',
   'Infrastructure',
@@ -90,31 +81,21 @@ const PAYMENT_METHODS = [
 
 type Company = (typeof COMPANIES)[number];
 
-/* =========================
-   Page Component
-   ========================= */
-
 export default function Dashboard() {
-  // ----- All hooks at top (prevents React error #310) -----
   const router = useRouter();
   const { data: session, status } = useSession();
-
-  // Data & UI state
   const [subscriptions, setSubscriptions] = useState<Subscription[]>([]);
   const [isLoading, setIsLoading] = useState(true);
-
   const [showModal, setShowModal] = useState(false);
   const [showDocumentsModal, setShowDocumentsModal] = useState(false);
   const [showHelpModal, setShowHelpModal] = useState(false);
   const [selectedSubscription, setSelectedSubscription] = useState<Subscription | null>(null);
   const [editingId, setEditingId] = useState<number | null>(null);
-
   const [searchTerm, setSearchTerm] = useState('');
   const [companyFilter, setCompanyFilter] = useState<'all' | Company>('all');
   const [categoryFilter, setCategoryFilter] = useState('all');
   const [paymentFilter, setPaymentFilter] = useState<'all' | 'paid' | 'pending' | 'overdue'>('all');
   const [viewMode, setViewMode] = useState<'grid' | 'table' | 'analytics'>('grid');
-
   const [currentTags, setCurrentTags] = useState<string[]>([]);
   const [tagInput, setTagInput] = useState('');
 
@@ -130,6 +111,7 @@ export default function Dashboard() {
     renewalAlert: 30,
     status: 'active',
     paymentMethod: 'Credit Card',
+    usage: undefined,
     tags: [],
     notes: '',
     attachments: [],
@@ -137,81 +119,18 @@ export default function Dashboard() {
     lastPaymentStatus: 'pending',
   });
 
-  // ----- Derived values (useMemo BEFORE any conditional returns) -----
-  const stats = useMemo(() => {
-    const active = subscriptions.filter(s => s.status === 'active');
-    const monthly = active.reduce((total, sub) => {
-      let cost = sub.cost;
-      if (sub.billing === 'yearly') cost = sub.cost / 12;
-      if (sub.billing === 'quarterly') cost = sub.cost / 3;
-      return total + cost;
-    }, 0);
-
-    const vendors = new Set(subscriptions.map(s => s.service)).size;
-    const paidCount = subscriptions.filter(s => s.lastPaymentStatus === 'paid').length;
-    const pendingCount = subscriptions.filter(s => s.lastPaymentStatus === 'pending').length;
-    const overdueCount = subscriptions.filter(s => s.lastPaymentStatus === 'overdue').length;
-
-    return {
-      monthly: monthly.toFixed(2),
-      yearly: (monthly * 12).toFixed(2),
-      active: active.length,
-      total: subscriptions.length,
-      vendors,
-      paidCount,
-      pendingCount,
-      overdueCount,
-    };
-  }, [subscriptions]);
-
-  const upcomingRenewals = useMemo(() => {
-    const today = new Date();
-    return subscriptions
-      .filter((sub) => {
-        if (!sub.nextBilling || sub.status !== 'active') return false;
-        const renewalDate = new Date(sub.nextBilling);
-        const daysUntil = Math.ceil((renewalDate.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
-        return daysUntil <= sub.renewalAlert && daysUntil >= 0;
-      })
-      .sort((a, b) => (a.nextBilling || '').localeCompare(b.nextBilling || ''));
-  }, [subscriptions]);
-
-  const filteredSubscriptions = useMemo(() => {
-    let filtered = subscriptions;
-
-    if (companyFilter !== 'all') {
-      filtered = filtered.filter(sub => sub.company === companyFilter);
-    }
-    if (categoryFilter !== 'all') {
-      filtered = filtered.filter(sub => sub.category === categoryFilter);
-    }
-    if (paymentFilter !== 'all') {
-      filtered = filtered.filter(sub => sub.lastPaymentStatus === paymentFilter);
-    }
-    if (searchTerm) {
-      const q = searchTerm.toLowerCase();
-      filtered = filtered.filter(sub =>
-        sub.service.toLowerCase().includes(q) ||
-        sub.company.toLowerCase().includes(q) ||
-        (sub.manager && sub.manager.toLowerCase().includes(q)) ||
-        (sub.tags && sub.tags.some(tag => tag.toLowerCase().includes(q)))
-      );
-    }
-    return filtered;
-  }, [subscriptions, companyFilter, categoryFilter, paymentFilter, searchTerm]);
-
-  // ----- Effects -----
-  // Redirect if unauthenticated
+  // Check authentication
   useEffect(() => {
     if (status === 'unauthenticated') {
       router.push('/login');
     }
   }, [status, router]);
 
-  // Load data only when authenticated
+  // Load subscriptions from database - only when authenticated
   useEffect(() => {
     async function loadSubscriptions() {
       if (status !== 'authenticated') return;
+      
       setIsLoading(true);
       try {
         const data = await api.getSubscriptions();
@@ -226,22 +145,112 @@ export default function Dashboard() {
     loadSubscriptions();
   }, [status]);
 
-  // ----- Conditional returns AFTER all hooks/useMemo -----
+  // Show loading while checking authentication
   if (status === 'loading') {
     return (
-      <div style={fullHeightCenter('#F9FAFB')}>
+      <div style={{
+        minHeight: '100vh',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        background: '#F9FAFB'
+      }}>
         <div style={{ textAlign: 'center' }}>
-          <Spinner />
+          <div style={{
+            width: '40px',
+            height: '40px',
+            border: '3px solid #E5E7EB',
+            borderTop: '3px solid #4F46E5',
+            borderRadius: '50%',
+            animation: 'spin 1s linear infinite',
+            margin: '0 auto 16px'
+          }} />
+          <style jsx>{`
+            @keyframes spin {
+              0% { transform: rotate(0deg); }
+              100% { transform: rotate(360deg); }
+            }
+          `}</style>
           <p style={{ color: '#6B7280' }}>Authenticating...</p>
         </div>
       </div>
     );
   }
-  if (!session) return null;
 
-  /* =========================
-     Helpers
-     ========================= */
+  // Don't render if not authenticated
+  if (!session) {
+    return null;
+  }
+
+  // Stats
+  const stats = useMemo(() => {
+    const active = subscriptions.filter(s => s.status === 'active');
+    const monthly = active.reduce((total, sub) => {
+      let cost = sub.cost;
+      if (sub.billing === 'yearly') cost = sub.cost / 12;
+      if (sub.billing === 'quarterly') cost = sub.cost / 3;
+      return total + cost;
+    }, 0);
+
+    const vendors = new Set(subscriptions.map(s => s.service)).size;
+
+    const paidCount = subscriptions.filter(s => s.lastPaymentStatus === 'paid').length;
+    const pendingCount = subscriptions.filter(s => s.lastPaymentStatus === 'pending').length;
+    const overdueCount = subscriptions.filter(s => s.lastPaymentStatus === 'overdue').length;
+
+    return {
+      monthly: monthly.toFixed(2),
+      yearly: (monthly * 12).toFixed(2),
+      active: active.length,
+      total: subscriptions.length,
+      vendors,
+      paidCount,
+      pendingCount,
+      overdueCount
+    };
+  }, [subscriptions]);
+
+  // Upcoming renewals
+  const upcomingRenewals = useMemo(() => {
+    const today = new Date();
+    return subscriptions
+      .filter((sub) => {
+        if (!sub.nextBilling || sub.status !== 'active') return false;
+        const renewalDate = new Date(sub.nextBilling);
+        const daysUntil = Math.ceil((renewalDate.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+        return daysUntil <= sub.renewalAlert && daysUntil >= 0;
+      })
+      .sort((a, b) => (a.nextBilling || '').localeCompare(b.nextBilling || ''));
+  }, [subscriptions]);
+
+  // Filters
+  const filteredSubscriptions = useMemo(() => {
+    let filtered = subscriptions;
+
+    if (companyFilter !== 'all') {
+      filtered = filtered.filter(sub => sub.company === companyFilter);
+    }
+
+    if (categoryFilter !== 'all') {
+      filtered = filtered.filter(sub => sub.category === categoryFilter);
+    }
+
+    if (paymentFilter !== 'all') {
+      filtered = filtered.filter(sub => sub.lastPaymentStatus === paymentFilter);
+    }
+
+    if (searchTerm) {
+      const q = searchTerm.toLowerCase();
+      filtered = filtered.filter(sub =>
+        sub.service.toLowerCase().includes(q) ||
+        sub.company.toLowerCase().includes(q) ||
+        (sub.manager && sub.manager.toLowerCase().includes(q)) ||
+        (sub.tags && sub.tags.some(tag => tag.toLowerCase().includes(q)))
+      );
+    }
+
+    return filtered;
+  }, [subscriptions, companyFilter, categoryFilter, paymentFilter, searchTerm]);
 
   const handleFileUpload = async (event: ChangeEvent<HTMLInputElement>, subscriptionId?: number) => {
     const files = event.target.files;
@@ -272,7 +281,7 @@ export default function Dashboard() {
         size: file.size,
         uploadDate: new Date().toISOString(),
         data: base64,
-        mimeType: file.type,
+        mimeType: file.type
       };
 
       if (subscriptionId) {
@@ -307,17 +316,17 @@ export default function Dashboard() {
       const subscription = subscriptions.find(s => s.id === subscriptionId);
       if (!subscription) return;
 
-      const payment: Payment = {
+      const payment = {
         date: new Date().toISOString(),
         amount: subscription.cost,
         status: 'paid',
         method: subscription.paymentMethod,
-        reference: `PAY-${Date.now()}`,
+        reference: `PAY-${Date.now()}`
       };
 
       await api.markAsPaid(subscriptionId, payment);
-
-      // Reload
+      
+      // Reload subscriptions
       const data = await api.getSubscriptions();
       setSubscriptions(data);
     } catch (error) {
@@ -364,7 +373,8 @@ export default function Dashboard() {
           tags: currentTags,
         });
       }
-
+      
+      // Reload subscriptions after save
       const data = await api.getSubscriptions();
       setSubscriptions(data);
       resetForm();
@@ -387,6 +397,7 @@ export default function Dashboard() {
       renewalAlert: 30,
       status: 'active',
       paymentMethod: 'Credit Card',
+      usage: undefined,
       tags: [],
       notes: '',
       attachments: [],
@@ -400,7 +411,7 @@ export default function Dashboard() {
   };
 
   const handleEdit = (sub: Subscription) => {
-    const { id: _id, cost: _ignore, attachment_count: _ac, ...rest } = sub;
+    const { id: _id, cost: _ignore, ...rest } = sub;
     setFormData({ ...rest, cost: sub.cost.toString() });
     setCurrentTags(sub.tags || []);
     setEditingId(sub.id);
@@ -408,7 +419,7 @@ export default function Dashboard() {
   };
 
   const handleDelete = async (id: number) => {
-    if (confirm('Delete this subscription? This action cannot be undone.')) {
+    if (confirm('Are you sure you want to delete this subscription? This action cannot be undone.')) {
       try {
         await api.deleteSubscription(id);
         const data = await api.getSubscriptions();
@@ -462,17 +473,13 @@ export default function Dashboard() {
     }
   };
 
-  /* =========================
-     Render
-     ========================= */
-
   return (
     <div style={{
       minHeight: '100vh',
       background: '#F9FAFB',
       fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif'
     }}>
-      {/* Top Nav */}
+      {/* Navigation Header */}
       <nav style={{
         background: '#FFFFFF',
         borderBottom: '1px solid #E5E7EB',
@@ -515,6 +522,7 @@ export default function Dashboard() {
           </div>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+            {/* Display user email */}
             {session.user?.email && (
               <span style={{ fontSize: '14px', color: '#6B7280' }}>
                 {session.user.email}
@@ -522,49 +530,85 @@ export default function Dashboard() {
             )}
             <button
               onClick={handleExport}
-              style={ghostBtn}
-              onMouseEnter={hoverFill}
-              onMouseLeave={hoverReset}
-            >
+              style={{
+                padding: '8px 16px',
+                background: 'transparent',
+                border: 'none',
+                color: '#6B7280',
+                fontSize: '14px',
+                fontWeight: '500',
+                cursor: 'pointer',
+                borderRadius: '6px',
+                transition: 'all 0.2s'
+              }}
+              onMouseEnter={e => e.currentTarget.style.background = '#F3F4F6'}
+              onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
               Export Data
             </button>
             <button
               onClick={() => setShowHelpModal(true)}
-              style={ghostBtn}
-              onMouseEnter={hoverFill}
-              onMouseLeave={hoverReset}
-            >
+              style={{
+                padding: '8px 16px',
+                background: 'transparent',
+                border: 'none',
+                color: '#6B7280',
+                fontSize: '14px',
+                fontWeight: '500',
+                cursor: 'pointer',
+                borderRadius: '6px',
+                transition: 'all 0.2s'
+              }}
+              onMouseEnter={e => e.currentTarget.style.background = '#F3F4F6'}
+              onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
               Help
             </button>
-            <button
-              style={ghostBtn}
-              onMouseEnter={hoverFill}
-              onMouseLeave={hoverReset}
-            >
+            <button style={{
+              padding: '8px 16px',
+              background: 'transparent',
+              border: 'none',
+              color: '#6B7280',
+              fontSize: '14px',
+              fontWeight: '500',
+              cursor: 'pointer',
+              borderRadius: '6px',
+              transition: 'all 0.2s'
+            }}
+            onMouseEnter={e => e.currentTarget.style.background = '#F3F4F6'}
+            onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
               Settings
             </button>
             <div style={{ width: '1px', height: '24px', background: '#E5E7EB' }} />
             <button
               onClick={() => signOut({ callbackUrl: '/login' })}
-              style={outlineBtn}
-              onMouseEnter={(e) => {
+              style={{
+                padding: '8px 16px',
+                background: 'transparent',
+                border: '1px solid #E5E7EB',
+                color: '#374151',
+                fontSize: '14px',
+                fontWeight: '500',
+                cursor: 'pointer',
+                borderRadius: '6px',
+                transition: 'all 0.2s'
+              }}
+              onMouseEnter={e => {
                 e.currentTarget.style.background = '#F9FAFB';
-                (e.currentTarget.style as any).borderColor = '#D1D5DB';
+                e.currentTarget.style.borderColor = '#D1D5DB';
               }}
-              onMouseLeave={(e) => {
+              onMouseLeave={e => {
                 e.currentTarget.style.background = 'transparent';
-                (e.currentTarget.style as any).borderColor = '#E5E7EB';
-              }}
-            >
+                e.currentTarget.style.borderColor = '#E5E7EB';
+              }}>
               Sign Out
             </button>
           </div>
         </div>
       </nav>
 
-      {/* Main */}
+      {/* Main Content */}
       <div style={{ maxWidth: '1280px', margin: '0 auto', padding: '24px' }}>
-        {/* Header */}
+
+        {/* Page Header */}
         <div style={{ marginBottom: '32px' }}>
           <h1 style={{ fontSize: '30px', fontWeight: '700', color: '#111827', marginBottom: '8px' }}>
             Subscription Management
@@ -574,51 +618,95 @@ export default function Dashboard() {
           </p>
         </div>
 
-        {/* Loading */}
+        {/* Loading State */}
         {isLoading ? (
-          <div style={cardBox(48)}>
-            <Spinner />
+          <div style={{
+            background: '#FFFFFF',
+            border: '1px solid #E5E7EB',
+            borderRadius: '8px',
+            padding: '48px',
+            textAlign: 'center'
+          }}>
+            <div style={{ display: 'inline-block' }}>
+              <div style={{
+                width: '40px',
+                height: '40px',
+                border: '3px solid #E5E7EB',
+                borderTop: '3px solid #4F46E5',
+                borderRadius: '50%',
+                animation: 'spin 1s linear infinite',
+                margin: '0 auto 16px'
+              }} />
+              <style jsx>{`
+                @keyframes spin {
+                  0% { transform: rotate(0deg); }
+                  100% { transform: rotate(360deg); }
+                }
+              `}</style>
+            </div>
             <p style={{ color: '#6B7280', fontSize: '14px' }}>Loading subscriptions...</p>
           </div>
         ) : (
           <>
-            {/* Alerts */}
+            {/* Alerts Section */}
             {(upcomingRenewals.length > 0 || stats.overdueCount > 0) && (
               <div style={{ marginBottom: '24px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
                 {upcomingRenewals.length > 0 && (
-                  <Alert
-                    tone="warning"
-                    title={`${upcomingRenewals.length} Upcoming Renewal${upcomingRenewals.length > 1 ? 's' : ''}`}
-                    iconColor="#F59E0B"
-                    bg="#FEF3C7"
-                    border="#FCD34D"
-                    textColor="#78350F"
-                  >
-                    {upcomingRenewals.map((sub, idx) => (
-                      <span key={sub.id}>
-                        {sub.service} ({formatDate(sub.nextBilling)})
-                        {idx < upcomingRenewals.length - 1 ? ' • ' : ''}
-                      </span>
-                    ))}
-                  </Alert>
+                  <div style={{
+                    padding: '16px',
+                    background: '#FEF3C7',
+                    border: '1px solid #FCD34D',
+                    borderRadius: '8px',
+                    display: 'flex',
+                    gap: '12px',
+                    alignItems: 'flex-start'
+                  }}>
+                    <svg width="20" height="20" viewBox="0 0 20 20" fill="#F59E0B">
+                      <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+                    </svg>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontWeight: '600', color: '#92400E', marginBottom: '4px' }}>
+                        {upcomingRenewals.length} Upcoming Renewal{upcomingRenewals.length > 1 ? 's' : ''}
+                      </div>
+                      <div style={{ fontSize: '14px', color: '#78350F' }}>
+                        {upcomingRenewals.map((sub, idx) => (
+                          <span key={sub.id}>
+                            {sub.service} ({formatDate(sub.nextBilling)})
+                            {idx < upcomingRenewals.length - 1 ? ' • ' : ''}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
                 )}
 
                 {stats.overdueCount > 0 && (
-                  <Alert
-                    tone="danger"
-                    title={`${stats.overdueCount} Overdue Payment${stats.overdueCount > 1 ? 's' : ''}`}
-                    iconColor="#DC2626"
-                    bg="#FEE2E2"
-                    border="#FCA5A5"
-                    textColor="#7F1D1D"
-                  >
-                    Review and process overdue payments to avoid service disruptions
-                  </Alert>
+                  <div style={{
+                    padding: '16px',
+                    background: '#FEE2E2',
+                    border: '1px solid #FCA5A5',
+                    borderRadius: '8px',
+                    display: 'flex',
+                    gap: '12px',
+                    alignItems: 'flex-start'
+                  }}>
+                    <svg width="20" height="20" viewBox="0 0 20 20" fill="#DC2626">
+                      <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
+                    </svg>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontWeight: '600', color: '#991B1B', marginBottom: '4px' }}>
+                        {stats.overdueCount} Overdue Payment{stats.overdueCount > 1 ? 's' : ''}
+                      </div>
+                      <div style={{ fontSize: '14px', color: '#7F1D1D' }}>
+                        Review and process overdue payments to avoid service disruptions
+                      </div>
+                    </div>
+                  </div>
                 )}
               </div>
             )}
 
-            {/* Metrics */}
+            {/* Metrics Cards */}
             <div style={{
               display: 'grid',
               gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
@@ -629,33 +717,56 @@ export default function Dashboard() {
                 label="Monthly Spend"
                 value={formatCurrency(parseFloat(stats.monthly))}
                 trend="+12.5%"
-                trendUp
-                icon={<IconMoney />}
+                trendUp={true}
+                icon={
+                  <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
+                    <path d="M8.433 7.418c.155-.103.346-.196.567-.267v1.698a2.305 2.305 0 01-.567-.267C8.07 8.34 8 8.114 8 8c0-.114.07-.34.433-.582zM11 12.849v-1.698c.22.071.412.164.567.267.364.243.433.468.433.582 0 .114-.07.34-.433.582a2.305 2.305 0 01-.567.267z" />
+                    <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-13a1 1 0 10-2 0v.092a4.535 4.535 0 00-1.676.662C6.602 6.234 6 7.009 6 8c0 .99.602 1.765 1.324 2.246.48.32 1.054.545 1.676.662v1.941c-.391-.127-.68-.317-.843-.504a1 1 0 10-1.51 1.31c.562.649 1.413 1.076 2.353 1.253V15a1 1 0 102 0v-.092a4.535 4.535 0 001.676-.662C13.398 13.766 14 12.991 14 12c0-.99-.602-1.765-1.324-2.246A4.535 4.535 0 0011 9.092V7.151c.391.127.68.317.843.504a1 1 0 101.511-1.31c-.563-.649-1.413-1.076-2.354-1.253V5z" clipRule="evenodd" />
+                  </svg>
+                }
               />
               <MetricCard
                 label="Annual Projection"
                 value={formatCurrency(parseFloat(stats.yearly))}
                 trend="-3.2%"
-                icon={<IconCalendarMoney />}
+                trendUp={false}
+                icon={
+                  <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
+                    <path fillRule="evenodd" d="M6 2a1 1 0 00-1 1v1H4a2 2 0 00-2 2v10a2 2 0 002 2h12a2 2 0 002-2V6a2 2 0 00-2-2h-1V3a1 1 0 10-2 0v1H7V3a1 1 0 00-1-1zm0 5a1 1 0 000 2h8a1 1 0 100-2H6z" clipRule="evenodd" />
+                  </svg>
+                }
               />
               <MetricCard
                 label="Active Subscriptions"
                 value={stats.active.toString()}
                 sublabel={`of ${stats.total} total`}
-                icon={<IconActive />}
+                icon={
+                  <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
+                    <path d="M9 2a1 1 0 000 2h2a1 1 0 100-2H9z" />
+                    <path fillRule="evenodd" d="M4 5a2 2 0 012-2 1 1 0 000 2H6a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2a1 1 0 100 2 2 2 0 002 2v1a1 1 0 11-2 0v-1H6v1a1 1 0 11-2 0v-1a2 2 0 01-2-2V5z" clipRule="evenodd" />
+                  </svg>
+                }
               />
               <MetricCard
                 label="Vendors"
                 value={stats.vendors.toString()}
                 sublabel="unique providers"
-                icon={<IconVendors />}
+                icon={
+                  <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
+                    <path d="M13 6a3 3 0 11-6 0 3 3 0 016 0zM18 8a2 2 0 11-4 0 2 2 0 014 0zM14 15a4 4 0 00-8 0v3h8v-3zM6 8a2 2 0 11-4 0 2 2 0 014 0zM16 18v-3a5.972 5.972 0 00-.75-2.906A3.005 3.005 0 0119 15v3h-3zM4.75 12.094A5.973 5.973 0 004 15v3H1v-3a3 3 0 013.75-2.906z" />
+                  </svg>
+                }
               />
               <MetricCard
                 label="Payment Status"
                 value={`${stats.paidCount}/${stats.total}`}
                 sublabel="paid this period"
                 alert={stats.overdueCount > 0}
-                icon={<IconPayment />}
+                icon={
+                  <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
+                    <path fillRule="evenodd" d="M4 4a2 2 0 00-2 2v4a2 2 0 002 2V6h10a2 2 0 00-2-2H4zm2 6a2 2 0 012-2h8a2 2 0 012 2v4a2 2 0 01-2 2H8a2 2 0 01-2-2v-4zm6 4a2 2 0 100-4 2 2 0 000 4z" clipRule="evenodd" />
+                  </svg>
+                }
               />
             </div>
 
@@ -675,7 +786,11 @@ export default function Dashboard() {
               <div style={{ display: 'flex', gap: '12px', flex: '1', flexWrap: 'wrap', minWidth: '0' }}>
                 {/* Search */}
                 <div style={{ position: 'relative', flex: '1', minWidth: '200px', maxWidth: '320px' }}>
-                  <IconSearch style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)' }} />
+                  <svg
+                    style={{ position: 'absolute', left: '12px', top: '50%', transform: 'translateY(-50%)' }}
+                    width="16" height="16" viewBox="0 0 20 20" fill="#9CA3AF">
+                    <path fillRule="evenodd" d="M8 4a4 4 0 100 8 4 4 0 000-8zM2 8a6 6 0 1110.89 3.476l4.817 4.817a1 1 0 01-1.414 1.414l-4.816-4.816A6 6 0 012 8z" clipRule="evenodd" />
+                  </svg>
                   <input
                     type="text"
                     placeholder="Search subscriptions..."
@@ -699,8 +814,16 @@ export default function Dashboard() {
                 <select
                   value={companyFilter}
                   onChange={e => setCompanyFilter(e.target.value as 'all' | Company)}
-                  style={selectStyle}
-                >
+                  style={{
+                    padding: '8px 12px',
+                    border: '1px solid #E5E7EB',
+                    borderRadius: '6px',
+                    fontSize: '14px',
+                    background: '#FFFFFF',
+                    cursor: 'pointer',
+                    minWidth: '120px',
+                    outline: 'none'
+                  }}>
                   <option value="all">All Companies</option>
                   {COMPANIES.map(c => (
                     <option key={c} value={c}>{c}</option>
@@ -710,8 +833,16 @@ export default function Dashboard() {
                 <select
                   value={categoryFilter}
                   onChange={e => setCategoryFilter(e.target.value)}
-                  style={selectStyle}
-                >
+                  style={{
+                    padding: '8px 12px',
+                    border: '1px solid #E5E7EB',
+                    borderRadius: '6px',
+                    fontSize: '14px',
+                    background: '#FFFFFF',
+                    cursor: 'pointer',
+                    minWidth: '120px',
+                    outline: 'none'
+                  }}>
                   <option value="all">All Categories</option>
                   {CATEGORIES.map(c => (
                     <option key={c} value={c}>{c}</option>
@@ -721,8 +852,16 @@ export default function Dashboard() {
                 <select
                   value={paymentFilter}
                   onChange={e => setPaymentFilter(e.target.value as any)}
-                  style={selectStyle}
-                >
+                  style={{
+                    padding: '8px 12px',
+                    border: '1px solid #E5E7EB',
+                    borderRadius: '6px',
+                    fontSize: '14px',
+                    background: '#FFFFFF',
+                    cursor: 'pointer',
+                    minWidth: '120px',
+                    outline: 'none'
+                  }}>
                   <option value="all">All Payments</option>
                   <option value="paid">Paid</option>
                   <option value="pending">Pending</option>
@@ -741,39 +880,56 @@ export default function Dashboard() {
                   <ViewToggleButton
                     active={viewMode === 'grid'}
                     onClick={() => setViewMode('grid')}
-                    first
-                  >
-                    <IconGrid />
+                    first>
+                    <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor">
+                      <path d="M5 3a2 2 0 00-2 2v2a2 2 0 002 2h2a2 2 0 002-2V5a2 2 0 00-2-2H5zM5 11a2 2 0 00-2 2v2a2 2 0 002 2h2a2 2 0 002-2v-2a2 2 0 00-2-2H5zM11 5a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V5zM13 11a2 2 0 00-2 2v2a2 2 0 002 2h2a2 2 0 002-2v-2a2 2 0 00-2-2h-2z" />
+                    </svg>
                   </ViewToggleButton>
                   <ViewToggleButton
                     active={viewMode === 'table'}
-                    onClick={() => setViewMode('table')}
-                  >
-                    <IconTable />
+                    onClick={() => setViewMode('table')}>
+                    <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor">
+                      <path fillRule="evenodd" d="M5 4a3 3 0 00-3 3v6a3 3 0 003 3h10a3 3 0 003-3V7a3 3 0 00-3-3H5zm-1 9v-1h5v2H5a1 1 0 01-1-1zm7 1h4a1 1 0 001-1v-1h-5v2zm0-4h5V8h-5v2zM9 8H4v2h5V8z" clipRule="evenodd" />
+                    </svg>
                   </ViewToggleButton>
                   <ViewToggleButton
                     active={viewMode === 'analytics'}
                     onClick={() => setViewMode('analytics')}
-                    last
-                  >
-                    <IconBars />
+                    last>
+                    <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor">
+                      <path d="M2 11a1 1 0 011-1h2a1 1 0 011 1v5a1 1 0 01-1 1H3a1 1 0 01-1-1v-5zM8 7a1 1 0 011-1h2a1 1 0 011 1v9a1 1 0 01-1 1H9a1 1 0 01-1-1V7zM14 4a1 1 0 011-1h2a1 1 0 011 1v12a1 1 0 01-1 1h-2a1 1 0 01-1-1V4z" />
+                    </svg>
                   </ViewToggleButton>
                 </div>
 
-                {/* Add */}
+                {/* Add Button */}
                 <button
                   onClick={() => setShowModal(true)}
-                  style={primaryBtn}
+                  style={{
+                    padding: '8px 16px',
+                    background: '#4F46E5',
+                    color: '#FFFFFF',
+                    border: 'none',
+                    borderRadius: '6px',
+                    fontSize: '14px',
+                    fontWeight: '500',
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                    transition: 'background 0.2s'
+                  }}
                   onMouseEnter={e => e.currentTarget.style.background = '#4338CA'}
-                  onMouseLeave={e => e.currentTarget.style.background = '#4F46E5'}
-                >
-                  <IconPlus />
+                  onMouseLeave={e => e.currentTarget.style.background = '#4F46E5'}>
+                  <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor">
+                    <path fillRule="evenodd" d="M10 3a1 1 0 011 1v5h5a1 1 0 110 2h-5v5a1 1 0 11-2 0v-5H4a1 1 0 110-2h5V4a1 1 0 011-1z" clipRule="evenodd" />
+                  </svg>
                   Add Subscription
                 </button>
               </div>
             </div>
 
-            {/* Content */}
+            {/* Content Area */}
             {filteredSubscriptions.length === 0 ? (
               <EmptyState onAddClick={() => setShowModal(true)} />
             ) : viewMode === 'grid' ? (
@@ -816,8 +972,16 @@ export default function Dashboard() {
                 getCompanyColor={getCompanyColor}
               />
             ) : (
-              <div style={cardBox(48)}>
-                <IconBarsLarge />
+              <div style={{
+                background: '#FFFFFF',
+                border: '1px solid #E5E7EB',
+                borderRadius: '8px',
+                padding: '48px',
+                textAlign: 'center'
+              }}>
+                <svg width="64" height="64" viewBox="0 0 20 20" fill="#E5E7EB" style={{ margin: '0 auto 16px' }}>
+                  <path d="M2 11a1 1 0 011-1h2a1 1 0 011 1v5a1 1 0 01-1 1H3a1 1 0 01-1-1v-5zM8 7a1 1 0 011-1h2a1 1 0 011 1v9a1 1 0 01-1 1H9a1 1 0 01-1-1V7zM14 4a1 1 0 011-1h2a1 1 0 011 1v12a1 1 0 01-1 1h-2a1 1 0 01-1-1V4z" />
+                </svg>
                 <h3 style={{ fontSize: '18px', fontWeight: '600', color: '#111827', marginBottom: '8px' }}>
                   Analytics Coming Soon
                 </h3>
@@ -830,53 +994,94 @@ export default function Dashboard() {
         )}
 
         {/* Modals */}
-        {showModal && (
-          <FormModal
-            editingId={editingId}
-            formData={formData}
-            setFormData={setFormData}
-            currentTags={currentTags}
-            tagInput={tagInput}
-            setTagInput={setTagInput}
-            onSubmit={handleSubmit}
-            onClose={resetForm}
-            onAddTag={addTag}
-            onRemoveTag={removeTag}
-            onFileUpload={handleFileUpload}
-            formatFileSize={formatFileSize}
-            COMPANIES={COMPANIES}
-            CATEGORIES={CATEGORIES}
-            PAYMENT_METHODS={PAYMENT_METHODS}
-          />
-        )}
+        {showModal && <FormModal
+          editingId={editingId}
+          formData={formData}
+          setFormData={setFormData}
+          currentTags={currentTags}
+          tagInput={tagInput}
+          setTagInput={setTagInput}
+          onSubmit={handleSubmit}
+          onClose={resetForm}
+          onAddTag={addTag}
+          onRemoveTag={removeTag}
+          onFileUpload={handleFileUpload}
+          formatFileSize={formatFileSize}
+          COMPANIES={COMPANIES}
+          CATEGORIES={CATEGORIES}
+          PAYMENT_METHODS={PAYMENT_METHODS}
+        />}
 
-        {showDocumentsModal && selectedSubscription && (
-          <DocumentsModal
-            subscription={selectedSubscription}
-            onClose={() => {
-              setShowDocumentsModal(false);
-              setSelectedSubscription(null);
-            }}
-            onUpload={(e: ChangeEvent<HTMLInputElement>) => {
-              handleFileUpload(e, selectedSubscription.id);
-              const updated = subscriptions.find(s => s.id === selectedSubscription.id);
-              if (updated) setSelectedSubscription(updated);
-            }}
-            onDownload={downloadFile}
-            formatDate={formatDate}
-            formatFileSize={formatFileSize}
-          />
-        )}
+        {showDocumentsModal && selectedSubscription && <DocumentsModal
+          subscription={selectedSubscription}
+          onClose={() => {
+            setShowDocumentsModal(false);
+            setSelectedSubscription(null);
+          }}
+          onUpload={(e: ChangeEvent<HTMLInputElement>) => {
+            handleFileUpload(e, selectedSubscription.id);
+            const updated = subscriptions.find(s => s.id === selectedSubscription.id);
+            if (updated) setSelectedSubscription(updated);
+          }}
+          onDownload={downloadFile}
+          formatDate={formatDate}
+          formatFileSize={formatFileSize}
+        />}
 
+        {/* Help Modal */}
         {showHelpModal && (
           <div
-            style={backdrop}
+            style={{
+              position: 'fixed',
+              top: 0, left: 0, right: 0, bottom: 0,
+              background: 'rgba(0, 0, 0, 0.5)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              padding: '20px',
+              zIndex: 1000
+            }}
             onClick={(e) => {
               if (e.target === e.currentTarget) setShowHelpModal(false);
             }}
           >
-            <div style={modalBox(800)}>
-              <ModalHeader title="How to Manage Variable Cost Subscriptions" onClose={() => setShowHelpModal(false)} />
+            <div style={{
+              background: '#FFFFFF',
+              borderRadius: '12px',
+              width: '100%',
+              maxWidth: '800px',
+              maxHeight: '90vh',
+              overflow: 'auto',
+              boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.25)'
+            }}>
+              <div style={{
+                padding: '24px',
+                borderBottom: '1px solid #E5E7EB',
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center'
+              }}>
+                <h2 style={{ fontSize: '20px', fontWeight: '600', color: '#111827', margin: 0 }}>
+                  How to Manage Variable Cost Subscriptions
+                </h2>
+                <button onClick={() => setShowHelpModal(false)} style={{
+                  width: '32px',
+                  height: '32px',
+                  border: 'none',
+                  background: '#F3F4F6',
+                  borderRadius: '6px',
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  color: '#6B7280'
+                }}>
+                  <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
+                    <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
+                  </svg>
+                </button>
+              </div>
+
               <div style={{ padding: '24px' }}>
                 <div style={{
                   background: 'linear-gradient(135deg, #EDE9FE 0%, #DDD6FE 100%)',
@@ -885,11 +1090,11 @@ export default function Dashboard() {
                   marginBottom: '24px'
                 }}>
                   <h3 style={{ fontSize: '16px', fontWeight: '600', color: '#5B21B6', marginBottom: '8px' }}>
-                    🎯 Perfect for Microsoft 365, Azure, AWS & Variable Services
+                    🎯 Perfect for Microsoft 365, Azure, AWS & Usage-Based Services
                   </h3>
                   <p style={{ fontSize: '14px', color: '#6D28D9', margin: 0 }}>
-                    Track subscriptions that change monthly due to seat count, tiers, or consumption.
-                    Store payment history, compute averages, and highlight cost spikes.
+                    Track subscriptions that change monthly based on usage, user count, or consumption.
+                    The system automatically calculates averages, detects cost spikes, and maintains history.
                   </p>
                 </div>
               </div>
@@ -901,283 +1106,7 @@ export default function Dashboard() {
   );
 }
 
-/* =========================
-   Small UI Helpers
-   ========================= */
-
-const Spinner = () => (
-  <>
-    <div style={{
-      width: '40px',
-      height: '40px',
-      border: '3px solid #E5E7EB',
-      borderTop: '3px solid #4F46E5',
-      borderRadius: '50%',
-      animation: 'spin 1s linear infinite',
-      margin: '0 auto 16px'
-    }} />
-    {/* styled-jsx for spinner */}
-    <style jsx>{`
-      @keyframes spin {
-        0% { transform: rotate(0deg); }
-        100% { transform: rotate(360deg); }
-      }
-    `}</style>
-  </>
-);
-
-const Alert = ({
-  tone,
-  title,
-  children,
-  bg,
-  border,
-  iconColor,
-  textColor,
-}: {
-  tone: 'warning' | 'danger';
-  title: string;
-  children: React.ReactNode;
-  bg: string;
-  border: string;
-  iconColor: string;
-  textColor: string;
-}) => (
-  <div style={{
-    padding: '16px',
-    background: bg,
-    border: `1px solid ${border}`,
-    borderRadius: '8px',
-    display: 'flex',
-    gap: '12px',
-    alignItems: 'flex-start'
-  }}>
-    <svg width="20" height="20" viewBox="0 0 20 20" fill={iconColor}>
-      {tone === 'warning' ? (
-        <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
-      ) : (
-        <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
-      )}
-    </svg>
-    <div style={{ flex: 1 }}>
-      <div style={{ fontWeight: '600', color: textColor, marginBottom: '4px' }}>
-        {title}
-      </div>
-      <div style={{ fontSize: '14px', color: textColor }}>
-        {children}
-      </div>
-    </div>
-  </div>
-);
-
-/* =========================
-   Icons
-   ========================= */
-
-const IconSearch = (props: any) => (
-  <svg {...props} width="16" height="16" viewBox="0 0 20 20" fill="#9CA3AF">
-    <path fillRule="evenodd" d="M8 4a4 4 0 100 8 4 4 0 000-8zM2 8a6 6 0 1110.89 3.476l4.817 4.817a1 1 0 01-1.414 1.414l-4.816-4.816A6 6 0 012 8z" clipRule="evenodd" />
-  </svg>
-);
-
-const IconMoney = () => (
-  <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
-    <path d="M8.433 7.418c.155-.103.346-.196.567-.267v1.698a2.305 2.305 0 01-.567-.267C8.07 8.34 8 8.114 8 8c0-.114.07-.34.433-.582zM11 12.849v-1.698c.22.071.412.164.567.267.364.243.433.468.433.582 0 .114-.07.34-.433.582a2.305 2.305 0 01-.567.267z" />
-    <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-13a1 1 0 10-2 0v.092a4.535 4.535 0 00-1.676.662C6.602 6.234 6 7.009 6 8c0 .99.602 1.765 1.324 2.246.48.32 1.054.545 1.676.662v1.941c-.391-.127-.68-.317-.843-.504a1 1 0 10-1.51 1.31c.562.649 1.413 1.076 2.353 1.253V15a1 1 0 102 0v-.092a4.535 4.535 0 001.676-.662C13.398 13.766 14 12.991 14 12c0-.99-.602-1.765-1.324-2.246A4.535 4.535 0 0011 9.092V7.151c.391.127.68.317.843.504a1 1 0 101.511-1.31c-.563-.649-1.413-1.076-2.354-1.253V5z" clipRule="evenodd" />
-  </svg>
-);
-
-const IconCalendarMoney = () => (
-  <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
-    <path fillRule="evenodd" d="M6 2a1 1 0 00-1 1v1H4a2 2 0 00-2 2v10a2 2 0 002 2h12a2 2 0 002-2V6a2 2 0 00-2-2h-1V3a1 1 0 10-2 0v1H7V3a1 1 0 00-1-1zm0 5a1 1 0 000 2h8a1 1 0 100-2H6z" clipRule="evenodd" />
-  </svg>
-);
-
-const IconActive = () => (
-  <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
-    <path d="M9 2a1 1 0 000 2h2a1 1 0 100-2H9z" />
-    <path fillRule="evenodd" d="M4 5a2 2 0 012-2 1 1 0 000 2H6a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2a1 1 0 100 2 2 2 0 002 2v1a1 1 0 11-2 0v-1H6v1a1 1 0 11-2 0v-1a2 2 0 01-2-2V5z" clipRule="evenodd" />
-  </svg>
-);
-
-const IconVendors = () => (
-  <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
-    <path d="M13 6a3 3 0 11-6 0 3 3 0 016 0zM18 8a2 2 0 11-4 0 2 2 0 014 0zM14 15a4 4 0 00-8 0v3h8v-3zM6 8a2 2 0 11-4 0 2 2 0 014 0zM16 18v-3a5.972 5.972 0 00-.75-2.906A3.005 3.005 0 0119 15v3h-3zM4.75 12.094A5.973 5.973 0 004 15v3H1v-3a3 3 0 013.75-2.906z" />
-  </svg>
-);
-
-const IconPayment = () => (
-  <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
-    <path fillRule="evenodd" d="M4 4a2 2 0 00-2 2v4a2 2 0 002 2V6h10a2 2 0 00-2-2H4zm2 6a2 2 0 012-2h8a2 2 0 012 2v4a2 2 0 01-2 2H8a2 2 0 01-2-2v-4zm6 4a2 2 0 100-4 2 2 0 000 4z" clipRule="evenodd" />
-  </svg>
-);
-
-const IconGrid = () => (
-  <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor">
-    <path d="M5 3a2 2 0 00-2 2v2a2 2 0 002 2h2a2 2 0 002-2V5a2 2 0 00-2-2H5zM5 11a2 2 0 00-2 2v2a2 2 0 002 2h2a2 2 0 002-2v-2a2 2 0 00-2-2H5zM11 5a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V5zM13 11a2 2 0 00-2 2v2a2 2 0 002 2h2a2 2 0 002-2v-2a2 2 0 00-2-2h-2z" />
-  </svg>
-);
-
-const IconTable = () => (
-  <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor">
-    <path fillRule="evenodd" d="M5 4a3 3 0 00-3 3v6a3 3 0 003 3h10a3 3 0 003-3V7a3 3 0 00-3-3H5zm-1 9v-1h5v2H5a1 1 0 01-1-1zm7 1h4a1 1 0 001-1v-1h-5v2zm0-4h5V8h-5v2zM9 8H4v2h5V8z" clipRule="evenodd" />
-  </svg>
-);
-
-const IconBars = () => (
-  <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor">
-    <path d="M2 11a1 1 0 011-1h2a1 1 0 011 1v5a1 1 0 01-1 1H3a1 1 0 01-1-1v-5zM8 7a1 1 0 011-1h2a1 1 0 011 1v9a1 1 0 01-1 1H9a1 1 0 01-1-1V7zM14 4a1 1 0 011-1h2a1 1 0 011 1v12a1 1 0 01-1 1h-2a1 1 0 01-1-1V4z" />
-  </svg>
-);
-
-const IconBarsLarge = () => (
-  <svg width="64" height="64" viewBox="0 0 20 20" fill="#E5E7EB" style={{ margin: '0 auto 16px' }}>
-    <path d="M2 11a1 1 0 011-1h2a1 1 0 011 1v5a1 1 0 01-1 1H3a1 1 0 01-1-1v-5zM8 7a1 1 0 011-1h2a1 1 0 011 1v9a1 1 0 01-1 1H9a1 1 0 01-1-1V7zM14 4a1 1 0 011-1h2a1 1 0 011 1v12a1 1 0 01-1 1h-2a1 1 0 01-1-1V4z" />
-  </svg>
-);
-
-const IconPlus = () => (
-  <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor" style={{ marginRight: 6 }}>
-    <path fillRule="evenodd" d="M10 3a1 1 0 011 1v5h5a1 1 0 110 2h-5v5a1 1 0 11-2 0v-5H4a1 1 0 110-2h5V4a1 1 0 011-1z" clipRule="evenodd" />
-  </svg>
-);
-
-/* =========================
-   Buttons & Styles
-   ========================= */
-
-const ghostBtn: React.CSSProperties = {
-  padding: '8px 16px',
-  background: 'transparent',
-  border: 'none',
-  color: '#6B7280',
-  fontSize: '14px',
-  fontWeight: '500',
-  cursor: 'pointer',
-  borderRadius: '6px',
-  transition: 'all 0.2s'
-};
-
-const outlineBtn: React.CSSProperties = {
-  padding: '8px 16px',
-  background: 'transparent',
-  border: '1px solid #E5E7EB',
-  color: '#374151',
-  fontSize: '14px',
-  fontWeight: '500',
-  cursor: 'pointer',
-  borderRadius: '6px',
-  transition: 'all 0.2s'
-};
-
-const primaryBtn: React.CSSProperties = {
-  padding: '8px 16px',
-  background: '#4F46E5',
-  color: '#FFFFFF',
-  border: 'none',
-  borderRadius: '6px',
-  fontSize: '14px',
-  fontWeight: '500',
-  cursor: 'pointer',
-  display: 'flex',
-  alignItems: 'center',
-  gap: '6px',
-  transition: 'background 0.2s'
-};
-
-const selectStyle: React.CSSProperties = {
-  padding: '8px 12px',
-  border: '1px solid #E5E7EB',
-  borderRadius: '6px',
-  fontSize: '14px',
-  background: '#FFFFFF',
-  cursor: 'pointer',
-  minWidth: '120px',
-  outline: 'none',
-};
-
-const hoverFill = (e: React.MouseEvent<HTMLButtonElement>) => {
-  e.currentTarget.style.background = '#F3F4F6';
-};
-const hoverReset = (e: React.MouseEvent<HTMLButtonElement>) => {
-  e.currentTarget.style.background = 'transparent';
-};
-
-const fullHeightCenter = (bg: string): React.CSSProperties => ({
-  minHeight: '100vh',
-  display: 'flex',
-  alignItems: 'center',
-  justifyContent: 'center',
-  background: bg,
-});
-
-const cardBox = (pad: number): React.CSSProperties => ({
-  background: '#FFFFFF',
-  border: '1px solid #E5E7EB',
-  borderRadius: '8px',
-  padding: `${pad}px`,
-  textAlign: 'center'
-});
-
-const backdrop: React.CSSProperties = {
-  position: 'fixed',
-  top: 0, left: 0, right: 0, bottom: 0,
-  background: 'rgba(0, 0, 0, 0.5)',
-  display: 'flex',
-  alignItems: 'center',
-  justifyContent: 'center',
-  padding: '20px',
-  zIndex: 1000
-};
-
-const modalBox = (maxWidth: number): React.CSSProperties => ({
-  background: '#FFFFFF',
-  borderRadius: '12px',
-  width: '100%',
-  maxWidth: `${maxWidth}px`,
-  maxHeight: '90vh',
-  overflow: 'auto',
-  boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.25)'
-});
-
-/* =========================
-   Reusable Pieces
-   ========================= */
-
-const ModalHeader = ({ title, onClose }: { title: string; onClose: () => void }) => (
-  <div style={{
-    padding: '24px',
-    borderBottom: '1px solid #E5E7EB',
-    display: 'flex',
-    justifyContent: 'space-between',
-    alignItems: 'center'
-  }}>
-    <h2 style={{ fontSize: '20px', fontWeight: '600', color: '#111827', margin: 0 }}>
-      {title}
-    </h2>
-    <button onClick={onClose} style={{
-      width: '32px',
-      height: '32px',
-      border: 'none',
-      background: '#F3F4F6',
-      borderRadius: '6px',
-      cursor: 'pointer',
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      color: '#6B7280'
-    }}>
-      <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
-        <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
-      </svg>
-    </button>
-  </div>
-);
-
-/* =========================
-   Metric Card
-   ========================= */
-
+// Component: Metric Card
 const MetricCard = ({ label, value, sublabel, trend, trendUp, alert, icon }: any) => (
   <div style={{
     background: '#FFFFFF',
@@ -1230,10 +1159,7 @@ const MetricCard = ({ label, value, sublabel, trend, trendUp, alert, icon }: any
   </div>
 );
 
-/* =========================
-   View Toggle Button
-   ========================= */
-
+// Component: View Toggle Button
 const ViewToggleButton = ({ active, onClick, children, first, last }: any) => (
   <button
     onClick={onClick}
@@ -1253,12 +1179,15 @@ const ViewToggleButton = ({ active, onClick, children, first, last }: any) => (
   </button>
 );
 
-/* =========================
-   Empty State
-   ========================= */
-
+// Component: Empty State
 const EmptyState = ({ onAddClick }: any) => (
-  <div style={cardBox(48)}>
+  <div style={{
+    background: '#FFFFFF',
+    border: '1px solid #E5E7EB',
+    borderRadius: '8px',
+    padding: '48px',
+    textAlign: 'center'
+  }}>
     <svg width="64" height="64" viewBox="0 0 20 20" fill="#E5E7EB" style={{ margin: '0 auto 16px' }}>
       <path fillRule="evenodd" d="M5 2a2 2 0 00-2 2v14l3.5-2 3.5 2 3.5-2 3.5 2V4a2 2 0 00-2-2H5zm2.5 3a1.5 1.5 0 100 3 1.5 1.5 0 000-3zm6.207.293a1 1 0 00-1.414 0l-6 6a1 1 0 101.414 1.414l6-6a1 1 0 000-1.414zM12.5 10a1.5 1.5 0 100 3 1.5 1.5 0 000-3z" clipRule="evenodd" />
     </svg>
@@ -1268,33 +1197,32 @@ const EmptyState = ({ onAddClick }: any) => (
     <p style={{ color: '#6B7280', fontSize: '14px', marginBottom: '24px' }}>
       Get started by adding your first subscription to begin tracking
     </p>
-    <button
-      onClick={onAddClick}
-      style={primaryBtn}
-      onMouseEnter={e => e.currentTarget.style.background = '#4338CA'}
-      onMouseLeave={e => e.currentTarget.style.background = '#4F46E5'}
-    >
-      <IconPlus />
+    <button onClick={onAddClick} style={{
+      padding: '10px 20px',
+      background: '#4F46E5',
+      color: '#FFFFFF',
+      border: 'none',
+      borderRadius: '6px',
+      fontSize: '14px',
+      fontWeight: '500',
+      cursor: 'pointer',
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: '6px',
+      transition: 'background 0.2s'
+    }}
+    onMouseEnter={e => e.currentTarget.style.background = '#4338CA'}
+    onMouseLeave={e => e.currentTarget.style.background = '#4F46E5'}>
+      <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor">
+        <path fillRule="evenodd" d="M10 3a1 1 0 011 1v5h5a1 1 0 110 2h-5v5a1 1 0 11-2 0v-5H4a1 1 0 110-2h5V4a1 1 0 011-1z" clipRule="evenodd" />
+      </svg>
       Add Your First Subscription
     </button>
   </div>
 );
 
-/* =========================
-   Subscription Card
-   ========================= */
-
-const SubscriptionCard = ({
-  subscription: sub,
-  onEdit,
-  onDelete,
-  onViewDocuments,
-  onMarkPaid,
-  onUpload,
-  formatCurrency,
-  formatDate,
-  getCompanyColor
-}: any) => {
+// Component: Subscription Card
+const SubscriptionCard = ({ subscription: sub, onEdit, onDelete, onViewDocuments, onMarkPaid, onUpload, formatCurrency, formatDate, getCompanyColor }: any) => {
   const getStatusColor = (status: string) => {
     switch (status) {
       case 'active': return { bg: '#D1FAE5', text: '#065F46' };
@@ -1303,6 +1231,7 @@ const SubscriptionCard = ({
       default: return { bg: '#F3F4F6', text: '#6B7280' };
     }
   };
+
   const getPaymentStatusColor = (status?: string) => {
     switch (status) {
       case 'paid': return { bg: '#D1FAE5', text: '#065F46' };
@@ -1316,18 +1245,20 @@ const SubscriptionCard = ({
   const paymentColors = getPaymentStatusColor(sub.lastPaymentStatus);
 
   return (
-    <div
-      style={{
-        background: '#FFFFFF',
-        border: sub.lastPaymentStatus === 'overdue' ? '1px solid #FCA5A5' : '1px solid #E5E7EB',
-        borderRadius: '8px',
-        padding: '20px',
-        transition: 'all 0.2s',
-        position: 'relative'
-      }}
-      onMouseEnter={e => { e.currentTarget.style.boxShadow = '0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06)'; }}
-      onMouseLeave={e => { e.currentTarget.style.boxShadow = 'none'; }}
-    >
+    <div style={{
+      background: '#FFFFFF',
+      border: sub.lastPaymentStatus === 'overdue' ? '1px solid #FCA5A5' : '1px solid #E5E7EB',
+      borderRadius: '8px',
+      padding: '20px',
+      transition: 'all 0.2s',
+      position: 'relative'
+    }}
+    onMouseEnter={e => {
+      e.currentTarget.style.boxShadow = '0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06)';
+    }}
+    onMouseLeave={e => {
+      e.currentTarget.style.boxShadow = 'none';
+    }}>
       {/* Header */}
       <div style={{ marginBottom: '16px' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '8px' }}>
@@ -1361,8 +1292,26 @@ const SubscriptionCard = ({
             )}
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', alignItems: 'flex-end' }}>
-            <span style={badge(statusColors)}>{sub.status.toUpperCase()}</span>
-            <span style={badge(paymentColors)}>{(sub.lastPaymentStatus || 'pending').toUpperCase()}</span>
+            <span style={{
+              padding: '2px 8px',
+              borderRadius: '12px',
+              fontSize: '11px',
+              fontWeight: '500',
+              background: statusColors.bg,
+              color: statusColors.text
+            }}>
+              {sub.status.toUpperCase()}
+            </span>
+            <span style={{
+              padding: '2px 8px',
+              borderRadius: '12px',
+              fontSize: '11px',
+              fontWeight: '500',
+              background: paymentColors.bg,
+              color: paymentColors.text
+            }}>
+              {(sub.lastPaymentStatus || 'pending').toUpperCase()}
+            </span>
           </div>
         </div>
       </div>
@@ -1377,12 +1326,30 @@ const SubscriptionCard = ({
         </div>
       </div>
 
+      {/* Usage Bar */}
+      {sub.usage !== undefined && (
+        <div style={{ marginBottom: '16px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+            <span style={{ fontSize: '12px', color: '#6B7280' }}>Usage</span>
+            <span style={{ fontSize: '12px', fontWeight: '500', color: '#111827' }}>{sub.usage}%</span>
+          </div>
+          <div style={{ height: '6px', background: '#E5E7EB', borderRadius: '3px', overflow: 'hidden' }}>
+            <div style={{
+              width: `${sub.usage}%`,
+              height: '100%',
+              background: sub.usage > 80 ? '#DC2626' : sub.usage > 60 ? '#F59E0B' : '#10B981',
+              transition: 'width 0.3s'
+            }} />
+          </div>
+        </div>
+      )}
+
       {/* Details */}
       <div style={{ marginBottom: '16px', display: 'grid', gap: '8px' }}>
         <DetailRow label="Next Billing" value={formatDate(sub.nextBilling)} />
         <DetailRow label="Category" value={sub.category} />
         {sub.manager && <DetailRow label="Manager" value={sub.manager} />}
-        <DetailRow label="Documents" value={`${sub.attachments?.length ?? sub.attachment_count ?? 0} files`} />
+        <DetailRow label="Documents" value={`${sub.attachments?.length || 0} files`} />
       </div>
 
       {/* Actions */}
@@ -1410,16 +1377,29 @@ const SubscriptionCard = ({
           </ActionButton>
         )}
 
-        <label style={uploadBtn}
-          onMouseEnter={e => {
-            e.currentTarget.style.background = '#F9FAFB';
-            (e.currentTarget.style as any).borderColor = '#D1D5DB';
-          }}
-          onMouseLeave={e => {
-            e.currentTarget.style.background = '#FFFFFF';
-            (e.currentTarget.style as any).borderColor = '#E5E7EB';
-          }}
-        >
+        <label style={{
+          padding: '6px',
+          border: '1px solid #E5E7EB',
+          borderRadius: '6px',
+          fontSize: '12px',
+          fontWeight: '500',
+          cursor: 'pointer',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: '4px',
+          color: '#6B7280',
+          background: '#FFFFFF',
+          transition: 'all 0.2s'
+        }}
+        onMouseEnter={e => {
+          e.currentTarget.style.background = '#F9FAFB';
+          e.currentTarget.style.borderColor = '#D1D5DB';
+        }}
+        onMouseLeave={e => {
+          e.currentTarget.style.background = '#FFFFFF';
+          e.currentTarget.style.borderColor = '#E5E7EB';
+        }}>
           <svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor">
             <path fillRule="evenodd" d="M8 4a3 3 0 00-3 3v4a3 3 0 003 3h4a3 3 0 003-3V7a3 3 0 00-3-3H8zm0 2h4a1 1 0 011 1v4a1 1 0 01-1 1H8a1 1 0 01-1-1V7a1 1 0 011-1z" clipRule="evenodd" />
             <path d="M8 9a1 1 0 000 2h4a1 1 0 100-2H8z" />
@@ -1437,35 +1417,7 @@ const SubscriptionCard = ({
   );
 };
 
-const badge = (c: { bg: string; text: string }): React.CSSProperties => ({
-  padding: '2px 8px',
-  borderRadius: '12px',
-  fontSize: '11px',
-  fontWeight: '500',
-  background: c.bg,
-  color: c.text
-});
-
-const uploadBtn: React.CSSProperties = {
-  padding: '6px',
-  border: '1px solid #E5E7EB',
-  borderRadius: '6px',
-  fontSize: '12px',
-  fontWeight: '500',
-  cursor: 'pointer',
-  display: 'flex',
-  alignItems: 'center',
-  justifyContent: 'center',
-  gap: '4px',
-  color: '#6B7280',
-  background: '#FFFFFF',
-  transition: 'all 0.2s'
-};
-
-/* =========================
-   Detail Row
-   ========================= */
-
+// Component: Detail Row
 const DetailRow = ({ label, value }: any) => (
   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
     <span style={{ fontSize: '12px', color: '#6B7280' }}>{label}</span>
@@ -1473,19 +1425,23 @@ const DetailRow = ({ label, value }: any) => (
   </div>
 );
 
-/* =========================
-   Action Button
-   ========================= */
-
+// Component: Action Button
 const ActionButton = ({ onClick, children, primary, success, danger }: any) => {
   let baseColor = '#6B7280';
   let hoverColor = '#4B5563';
   let bgColor = '#FFFFFF';
   let hoverBg = '#F9FAFB';
 
-  if (primary) { baseColor = '#4F46E5'; hoverColor = '#4338CA'; }
-  else if (success) { baseColor = '#059669'; hoverColor = '#047857'; }
-  else if (danger) { baseColor = '#DC2626'; hoverColor = '#B91C1C'; }
+  if (primary) {
+    baseColor = '#4F46E5';
+    hoverColor = '#4338CA';
+  } else if (success) {
+    baseColor = '#059669';
+    hoverColor = '#047857';
+  } else if (danger) {
+    baseColor = '#DC2626';
+    hoverColor = '#B91C1C';
+  }
 
   return (
     <button
@@ -1507,24 +1463,20 @@ const ActionButton = ({ onClick, children, primary, success, danger }: any) => {
       }}
       onMouseEnter={e => {
         e.currentTarget.style.background = hoverBg;
-        (e.currentTarget.style as any).borderColor = '#D1D5DB';
+        e.currentTarget.style.borderColor = '#D1D5DB';
         e.currentTarget.style.color = hoverColor;
       }}
       onMouseLeave={e => {
         e.currentTarget.style.background = bgColor;
-        (e.currentTarget.style as any).borderColor = '#E5E7EB';
+        e.currentTarget.style.borderColor = '#E5E7EB';
         e.currentTarget.style.color = baseColor;
-      }}
-    >
+      }}>
       {children}
     </button>
   );
 };
 
-/* =========================
-   Table View & Helpers
-   ========================= */
-
+// Component: Table View
 const TableView = ({ subscriptions, onEdit, onDelete, onMarkPaid, onUpload, onViewDocuments, formatCurrency, formatDate, getCompanyColor }: any) => (
   <div style={{
     background: '#FFFFFF',
@@ -1536,28 +1488,25 @@ const TableView = ({ subscriptions, onEdit, onDelete, onMarkPaid, onUpload, onVi
       <table style={{ width: '100%', borderCollapse: 'collapse' }}>
         <thead>
           <tr style={{ background: '#F9FAFB', borderBottom: '1px solid #E5E7EB' }}>
-            <th style={th}>Company</th>
-            <th style={th}>Service</th>
-            <th style={th}>Cost</th>
-            <th style={th}>Status</th>
-            <th style={th}>Payment</th>
-            <th style={th}>Next Billing</th>
-            <th style={th}>Manager</th>
-            <th style={{ ...th, textAlign: 'right' }}>Actions</th>
+            <th style={{ padding: '12px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#374151' }}>Company</th>
+            <th style={{ padding: '12px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#374151' }}>Service</th>
+            <th style={{ padding: '12px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#374151' }}>Cost</th>
+            <th style={{ padding: '12px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#374151' }}>Status</th>
+            <th style={{ padding: '12px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#374151' }}>Payment</th>
+            <th style={{ padding: '12px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#374151' }}>Next Billing</th>
+            <th style={{ padding: '12px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#374151' }}>Manager</th>
+            <th style={{ padding: '12px 16px', textAlign: 'right', fontSize: '12px', fontWeight: '600', color: '#374151' }}>Actions</th>
           </tr>
         </thead>
         <tbody>
           {subscriptions.map((sub: any, idx: number) => (
-            <tr
-              key={sub.id}
-              style={{
-                borderBottom: idx !== subscriptions.length - 1 ? '1px solid #E5E7EB' : 'none',
-                transition: 'background 0.2s'
-              }}
-              onMouseEnter={e => e.currentTarget.style.background = '#F9FAFB'}
-              onMouseLeave={e => e.currentTarget.style.background = '#FFFFFF'}
-            >
-              <td style={td}>
+            <tr key={sub.id} style={{
+              borderBottom: idx !== subscriptions.length - 1 ? '1px solid #E5E7EB' : 'none',
+              transition: 'background 0.2s'
+            }}
+            onMouseEnter={e => e.currentTarget.style.background = '#F9FAFB'}
+            onMouseLeave={e => e.currentTarget.style.background = '#FFFFFF'}>
+              <td style={{ padding: '12px 16px' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                   <div style={{
                     width: '6px',
@@ -1568,19 +1517,25 @@ const TableView = ({ subscriptions, onEdit, onDelete, onMarkPaid, onUpload, onVi
                   <span style={{ fontSize: '14px', color: '#111827' }}>{sub.company}</span>
                 </div>
               </td>
-              <td style={td}>
+              <td style={{ padding: '12px 16px' }}>
                 <div>
                   <div style={{ fontSize: '14px', color: '#111827', marginBottom: '4px' }}>{sub.service}</div>
                   {sub.tags && sub.tags.length > 0 && (
                     <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
                       {sub.tags.map((tag: string) => (
-                        <span key={tag} style={tagPill}>{tag}</span>
+                        <span key={tag} style={{
+                          padding: '1px 6px',
+                          background: '#F3F4F6',
+                          borderRadius: '10px',
+                          fontSize: '10px',
+                          color: '#6B7280'
+                        }}>{tag}</span>
                       ))}
                     </div>
                   )}
                 </div>
               </td>
-              <td style={td}>
+              <td style={{ padding: '12px 16px' }}>
                 <div style={{ fontSize: '14px', fontWeight: '600', color: '#111827' }}>
                   {formatCurrency(sub.cost)}
                   <span style={{ fontSize: '12px', color: '#6B7280', fontWeight: '400' }}>
@@ -1588,19 +1543,19 @@ const TableView = ({ subscriptions, onEdit, onDelete, onMarkPaid, onUpload, onVi
                   </span>
                 </div>
               </td>
-              <td style={td}>
+              <td style={{ padding: '12px 16px' }}>
                 <StatusBadge status={sub.status} />
               </td>
-              <td style={td}>
+              <td style={{ padding: '12px 16px' }}>
                 <PaymentStatusBadge status={sub.lastPaymentStatus} />
               </td>
-              <td style={{ ...td, fontSize: '14px', color: '#6B7280' }}>
+              <td style={{ padding: '12px 16px', fontSize: '14px', color: '#6B7280' }}>
                 {formatDate(sub.nextBilling)}
               </td>
-              <td style={{ ...td, fontSize: '14px', color: '#6B7280' }}>
+              <td style={{ padding: '12px 16px', fontSize: '14px', color: '#6B7280' }}>
                 {sub.manager || '-'}
               </td>
-              <td style={td}>
+              <td style={{ padding: '12px 16px' }}>
                 <div style={{ display: 'flex', gap: '4px', justifyContent: 'flex-end' }}>
                   <TableActionButton onClick={() => onEdit(sub)} title="Edit">
                     <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor">
@@ -1634,22 +1589,7 @@ const TableView = ({ subscriptions, onEdit, onDelete, onMarkPaid, onUpload, onVi
   </div>
 );
 
-const th: React.CSSProperties = {
-  padding: '12px 16px',
-  textAlign: 'left',
-  fontSize: '12px',
-  fontWeight: 600,
-  color: '#374151'
-};
-const td: React.CSSProperties = { padding: '12px 16px' };
-const tagPill: React.CSSProperties = {
-  padding: '1px 6px',
-  background: '#F3F4F6',
-  borderRadius: '10px',
-  fontSize: '10px',
-  color: '#6B7280'
-};
-
+// Component: Table Action Button
 const TableActionButton = ({ onClick, title, children, danger }: any) => (
   <button
     onClick={onClick}
@@ -1678,10 +1618,7 @@ const TableActionButton = ({ onClick, title, children, danger }: any) => (
   </button>
 );
 
-/* =========================
-   Badges
-   ========================= */
-
+// Component: Status Badge
 const StatusBadge = ({ status }: any) => {
   const getColors = () => {
     switch (status) {
@@ -1692,9 +1629,22 @@ const StatusBadge = ({ status }: any) => {
     }
   };
   const colors = getColors();
-  return <span style={badge(colors)}>{status.toUpperCase()}</span>;
+  
+  return (
+    <span style={{
+      padding: '2px 8px',
+      borderRadius: '12px',
+      fontSize: '11px',
+      fontWeight: '500',
+      background: colors.bg,
+      color: colors.text
+    }}>
+      {status.toUpperCase()}
+    </span>
+  );
 };
 
+// Component: Payment Status Badge
 const PaymentStatusBadge = ({ status }: any) => {
   const getColors = () => {
     switch (status) {
@@ -1705,21 +1655,47 @@ const PaymentStatusBadge = ({ status }: any) => {
     }
   };
   const colors = getColors();
-  return <span style={badge(colors)}>{(status || 'pending').toUpperCase()}</span>;
+  
+  return (
+    <span style={{
+      padding: '2px 8px',
+      borderRadius: '12px',
+      fontSize: '11px',
+      fontWeight: '500',
+      background: colors.bg,
+      color: colors.text
+    }}>
+      {(status || 'pending').toUpperCase()}
+    </span>
+  );
 };
 
-/* =========================
-   Form Modal
-   ========================= */
-
-const FormModal = ({
-  editingId, formData, setFormData,
-  currentTags, tagInput, setTagInput,
-  onSubmit, onClose, onAddTag, onRemoveTag,
-  onFileUpload, formatFileSize, COMPANIES, CATEGORIES, PAYMENT_METHODS
-}: any) => (
-  <div style={backdrop} onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-    <div style={modalBox(600)}>
+// Component: Form Modal
+const FormModal = ({ editingId, formData, setFormData, currentTags, tagInput, setTagInput, onSubmit, onClose, onAddTag, onRemoveTag, onFileUpload, formatFileSize, COMPANIES, CATEGORIES, PAYMENT_METHODS }: any) => (
+  <div
+    style={{
+      position: 'fixed',
+      top: 0, left: 0, right: 0, bottom: 0,
+      background: 'rgba(0, 0, 0, 0.5)',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: '20px',
+      zIndex: 1000
+    }}
+    onClick={(e) => {
+      if (e.target === e.currentTarget) onClose();
+    }}
+  >
+    <div style={{
+      background: '#FFFFFF',
+      borderRadius: '12px',
+      width: '100%',
+      maxWidth: '600px',
+      maxHeight: '90vh',
+      overflow: 'auto',
+      boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.25)'
+    }}>
       <div style={{
         padding: '24px',
         borderBottom: '1px solid #E5E7EB',
@@ -1875,11 +1851,23 @@ const FormModal = ({
                 value={formData.renewalAlert}
                 onChange={e => setFormData({ ...formData, renewalAlert: parseInt(e.target.value) || 30 })}
                 style={inputStyle}
-                min={1}
-                max={90}
+                min="1"
+                max="90"
               />
             </FormField>
           </div>
+
+          <FormField label="Usage (%)">
+            <input
+              type="number"
+              value={formData.usage || ''}
+              onChange={e => setFormData({ ...formData, usage: e.target.value ? parseInt(e.target.value) : undefined })}
+              style={inputStyle}
+              placeholder="0-100"
+              min="0"
+              max="100"
+            />
+          </FormField>
 
           <FormField label="Tags">
             <div style={{ display: 'flex', gap: '8px', marginBottom: '8px' }}>
@@ -1894,9 +1882,16 @@ const FormModal = ({
               <button
                 type="button"
                 onClick={onAddTag}
-                style={primaryBtn}
-                onMouseEnter={e => e.currentTarget.style.background = '#4338CA'}
-                onMouseLeave={e => e.currentTarget.style.background = '#4F46E5'}
+                style={{
+                  padding: '8px 16px',
+                  background: '#4F46E5',
+                  color: '#FFFFFF',
+                  border: 'none',
+                  borderRadius: '6px',
+                  fontSize: '14px',
+                  fontWeight: '500',
+                  cursor: 'pointer'
+                }}
               >
                 Add
               </button>
@@ -1922,7 +1917,7 @@ const FormModal = ({
                         border: 'none',
                         background: 'none',
                         cursor: 'pointer',
-                        padding: 0,
+                        padding: '0',
                         color: '#6B7280',
                         display: 'flex'
                       }}
@@ -1973,9 +1968,17 @@ const FormModal = ({
           </button>
           <button
             type="submit"
-            style={{ ...primaryBtn, flex: 1 }}
-            onMouseEnter={e => e.currentTarget.style.background = '#4338CA'}
-            onMouseLeave={e => e.currentTarget.style.background = '#4F46E5'}
+            style={{
+              flex: 1,
+              padding: '10px',
+              border: 'none',
+              background: '#4F46E5',
+              color: '#FFFFFF',
+              borderRadius: '6px',
+              fontSize: '14px',
+              fontWeight: '500',
+              cursor: 'pointer'
+            }}
           >
             {editingId !== null ? 'Update Subscription' : 'Add Subscription'}
           </button>
@@ -1985,13 +1988,32 @@ const FormModal = ({
   </div>
 );
 
-/* =========================
-   Documents Modal
-   ========================= */
-
+// Component: Documents Modal
 const DocumentsModal = ({ subscription, onClose, onUpload, onDownload, formatDate, formatFileSize }: any) => (
-  <div style={backdrop} onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-    <div style={modalBox(600)}>
+  <div
+    style={{
+      position: 'fixed',
+      top: 0, left: 0, right: 0, bottom: 0,
+      background: 'rgba(0, 0, 0, 0.5)',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: '20px',
+      zIndex: 1000
+    }}
+    onClick={(e) => {
+      if (e.target === e.currentTarget) onClose();
+    }}
+  >
+    <div style={{
+      background: '#FFFFFF',
+      borderRadius: '12px',
+      width: '100%',
+      maxWidth: '600px',
+      maxHeight: '90vh',
+      overflow: 'auto',
+      boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.25)'
+    }}>
       <div style={{
         padding: '24px',
         borderBottom: '1px solid #E5E7EB',
@@ -2026,29 +2048,27 @@ const DocumentsModal = ({ subscription, onClose, onUpload, onDownload, formatDat
       </div>
 
       <div style={{ padding: '24px' }}>
-        <label
-          style={{
-            display: 'block',
-            padding: '32px',
-            border: '2px dashed #E5E7EB',
-            borderRadius: '8px',
-            textAlign: 'center',
-            cursor: 'pointer',
-            marginBottom: '24px',
-            transition: 'all 0.2s',
-            background: '#F9FAFB'
-          } as React.CSSProperties}
-          onMouseEnter={e => {
-            (e.currentTarget.style as any).borderColor = '#4F46E5';
-            e.currentTarget.style.background = '#F5F3FF';
-          }}
-          onMouseLeave={e => {
-            (e.currentTarget.style as any).borderColor = '#E5E7EB';
-            e.currentTarget.style.background = '#F9FAFB';
-          }}
-        >
+        <label style={{
+          display: 'block',
+          padding: '32px',
+          border: '2px dashed #E5E7EB',
+          borderRadius: '8px',
+          textAlign: 'center',
+          cursor: 'pointer',
+          marginBottom: '24px',
+          transition: 'all 0.2s',
+          background: '#F9FAFB'
+        }}
+        onMouseEnter={e => {
+          e.currentTarget.style.borderColor = '#4F46E5';
+          e.currentTarget.style.background = '#F5F3FF';
+        }}
+        onMouseLeave={e => {
+          e.currentTarget.style.borderColor = '#E5E7EB';
+          e.currentTarget.style.background = '#F9FAFB';
+        }}>
           <svg width="48" height="48" viewBox="0 0 20 20" fill="#9CA3AF" style={{ margin: '0 auto 12px' }}>
-            <path fillRule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zM6.293 6.707a1 1 0 010-1.414l3-3a1 1 0 011.414 0l3 3a1 1 0 11-1.414 1.414L11 5.414V13a1 1 0 11-2 0V5.414L7.707 6.707a1 1 0 01-1.414 0z" clipRule="evenodd" />
+            <path fillRule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zM6.293 6.707a1 1 0 010-1.414l3-3a1 1 0 011.414 0l3 3a1 1 0 01-1.414 1.414L11 5.414V13a1 1 0 11-2 0V5.414L7.707 6.707a1 1 0 01-1.414 0z" clipRule="evenodd" />
           </svg>
           <div style={{ fontSize: '14px', color: '#374151', marginBottom: '4px' }}>
             Click to upload or drag and drop
@@ -2066,7 +2086,7 @@ const DocumentsModal = ({ subscription, onClose, onUpload, onDownload, formatDat
 
         {subscription.attachments && subscription.attachments.length > 0 ? (
           <div style={{ display: 'grid', gap: '12px' }}>
-            {subscription.attachments.map((file: FileAttachment) => (
+            {subscription.attachments.map((file: any) => (
               <div key={file.id} style={{
                 display: 'flex',
                 alignItems: 'center',
@@ -2139,10 +2159,7 @@ const DocumentsModal = ({ subscription, onClose, onUpload, onDownload, formatDat
   </div>
 );
 
-/* =========================
-   Form Field & Input Style
-   ========================= */
-
+// Helper: Form Field Component
 const FormField = ({ label, children }: any) => (
   <div>
     <label style={{
@@ -2158,7 +2175,8 @@ const FormField = ({ label, children }: any) => (
   </div>
 );
 
-const inputStyle: React.CSSProperties = {
+// Helper: Input Style
+const inputStyle = {
   width: '100%',
   padding: '8px 12px',
   border: '1px solid #E5E7EB',

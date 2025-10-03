@@ -6,6 +6,7 @@ export async function PUT(
   { params }: { params: { id: string } }
 ) {
   try {
+<<<<<<< HEAD
     const id = Number.parseInt(params.id, 10);
     if (!Number.isFinite(id)) {
       return NextResponse.json({ error: 'Invalid id' }, { status: 400 });
@@ -66,6 +67,33 @@ export async function PUT(
 
     await sql`DELETE FROM subscription_tags WHERE subscription_id = ${id}`;
     if (Array.isArray(tags) && tags.length > 0) {
+=======
+    const id = parseInt(params.id);
+    const body = await request.json();
+    const {
+      company, service, cost, billing, nextBilling, contractEnd,
+      category, manager, renewalAlert, status, paymentMethod,
+      usage, notes, tags, lastPaymentStatus
+    } = body;
+
+    // Update subscription
+    await sql`
+      UPDATE subscriptions
+      SET company = ${company}, service = ${service}, cost = ${cost},
+          billing = ${billing}, next_billing = ${nextBilling || null},
+          contract_end = ${contractEnd || null}, category = ${category || null},
+          manager = ${manager || null}, renewal_alert = ${renewalAlert || 30},
+          status = ${status || 'active'}, payment_method = ${paymentMethod || null},
+          usage = ${usage || null}, notes = ${notes || null},
+          last_payment_status = ${lastPaymentStatus || 'pending'},
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = ${id}
+    `;
+
+    // Update tags (delete and re-insert)
+    await sql`DELETE FROM subscription_tags WHERE subscription_id = ${id}`;
+    if (tags && tags.length > 0) {
+>>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
       for (const tag of tags) {
         await sql`
           INSERT INTO subscription_tags (subscription_id, tag)
@@ -86,6 +114,7 @@ export async function DELETE(
   { params }: { params: { id: string } }
 ) {
   try {
+<<<<<<< HEAD
     const id = Number.parseInt(params.id, 10);
     if (!Number.isFinite(id)) {
       return NextResponse.json({ error: 'Invalid id' }, { status: 400 });
@@ -97,6 +126,10 @@ export async function DELETE(
     await sql`DELETE FROM subscription_tags WHERE subscription_id = ${id}`;
     await sql`DELETE FROM subscriptions WHERE id = ${id}`;
 
+=======
+    const id = parseInt(params.id);
+    await sql`DELETE FROM subscriptions WHERE id = ${id}`;
+>>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
     return NextResponse.json({ success: true });
   } catch (error) {
     console.error('Error deleting subscription:', error);
