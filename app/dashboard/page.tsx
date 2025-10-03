@@ -1,9 +1,14 @@
 'use client';
 
 <<<<<<< HEAD
+<<<<<<< HEAD
 import type React from 'react';
 import { useSession, signOut } from 'next-auth/react';
 import { useRouter } from 'next/navigation';
+=======
+import { useSession } from 'next-auth/react';
+import { signOut } from 'next-auth/react';
+>>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
 =======
 import { useSession } from 'next-auth/react';
 import { signOut } from 'next-auth/react';
@@ -64,6 +69,7 @@ type Subscription = {
   payments?: Payment[];
   lastPaymentStatus?: 'paid' | 'pending' | 'overdue';
 <<<<<<< HEAD
+<<<<<<< HEAD
   pricingType?: 'fixed' | 'variable';
   currentMonthCost?: number | null;
   lastMonthCost?: number | null;
@@ -99,6 +105,11 @@ type FinancialReport = {
 
 const COMPANIES = ['Kisamos', 'Mizzen', 'Fertmax', 'Shantaram', 'Relia Ship'] as const;
 
+=======
+};
+
+const COMPANIES = ['Kisamos', 'Mizzen', 'Fertmax'] as const;
+>>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
 =======
 };
 
@@ -154,8 +165,12 @@ export default function Dashboard() {
   const [departmentFilter, setDepartmentFilter] = useState('all');
   const [paymentFilter, setPaymentFilter] = useState<'all' | 'paid' | 'pending' | 'overdue'>('all');
 <<<<<<< HEAD
+<<<<<<< HEAD
   const [viewMode, setViewMode] = useState<'grid' | 'table' | 'analytics' | 'reports'>('grid');
 
+=======
+  const [viewMode, setViewMode] = useState<'grid' | 'table' | 'analytics'>('grid');
+>>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
 =======
   const [viewMode, setViewMode] = useState<'grid' | 'table' | 'analytics'>('grid');
 >>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
@@ -189,6 +204,7 @@ export default function Dashboard() {
     budget: '',
   });
 
+<<<<<<< HEAD
 <<<<<<< HEAD
   // Helper function to parse subscription data from API
   const parseSubscriptionData = (data: any[]): Subscription[] => {
@@ -366,6 +382,9 @@ export default function Dashboard() {
 =======
   // Check authentication
 >>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
+=======
+  // Check authentication
+>>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
   useEffect(() => {
     if (status === 'unauthenticated') {
       router.push('/login');
@@ -373,6 +392,10 @@ export default function Dashboard() {
   }, [status, router]);
 
 <<<<<<< HEAD
+<<<<<<< HEAD
+=======
+  // Load subscriptions from database - only when authenticated
+>>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
 =======
   // Load subscriptions from database - only when authenticated
 >>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
@@ -395,6 +418,10 @@ export default function Dashboard() {
   }, [status]);
 
 <<<<<<< HEAD
+<<<<<<< HEAD
+=======
+  // Show loading while checking authentication
+>>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
 =======
   // Show loading while checking authentication
 >>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
@@ -569,9 +596,13 @@ export default function Dashboard() {
       if (!subscription) return;
 
 <<<<<<< HEAD
+<<<<<<< HEAD
       const paymentAmount = effectiveChargeForPayment(subscription);
 
       const payment: Payment = {
+=======
+      const payment = {
+>>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
 =======
       const payment = {
 >>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
@@ -580,12 +611,21 @@ export default function Dashboard() {
         status: 'paid',
         method: subscription.paymentMethod,
 <<<<<<< HEAD
+<<<<<<< HEAD
         reference: `PAY-${Date.now()}`,
         invoiceNumber: `INV-${Date.now()}`,
       };
 
       await api.markAsPaid(subscriptionId, payment);
 
+=======
+        reference: `PAY-${Date.now()}`
+      };
+
+      await api.markAsPaid(subscriptionId, payment);
+      
+      // Reload subscriptions
+>>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
 =======
         reference: `PAY-${Date.now()}`
       };
@@ -783,6 +823,7 @@ export default function Dashboard() {
 
   const handleEdit = (sub: Subscription) => {
 <<<<<<< HEAD
+<<<<<<< HEAD
     const { id: _id, cost: _ignore, attachment_count: _ac, ...rest } = sub;
     setFormData({
       ...rest,
@@ -791,6 +832,8 @@ export default function Dashboard() {
       pricingType: sub.pricingType || 'fixed',
     });
 =======
+=======
+>>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
     const { id: _id, cost: _ignore, ...rest } = sub;
     setFormData({ ...rest, cost: sub.cost.toString() });
 >>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
@@ -1153,7 +1196,11 @@ export default function Dashboard() {
             )}
 
 <<<<<<< HEAD
+<<<<<<< HEAD
             {/* Enhanced Metrics */}
+=======
+            {/* Metrics Cards */}
+>>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
 =======
             {/* Metrics Cards */}
 >>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
@@ -1179,9 +1226,12 @@ export default function Dashboard() {
                 label="Annual Projection"
                 value={formatCurrency(parseFloat(stats.yearly))}
 <<<<<<< HEAD
+<<<<<<< HEAD
                 sublabel={`Budget: ${formatCurrency(parseFloat(stats.totalBudget))}`}
                 icon={<IconCalendarMoney />}
 =======
+=======
+>>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
                 trend="-3.2%"
                 trendUp={false}
                 icon={
@@ -1189,6 +1239,7 @@ export default function Dashboard() {
                     <path fillRule="evenodd" d="M6 2a1 1 0 00-1 1v1H4a2 2 0 00-2 2v10a2 2 0 002 2h12a2 2 0 002-2V6a2 2 0 00-2-2h-1V3a1 1 0 10-2 0v1H7V3a1 1 0 00-1-1zm0 5a1 1 0 000 2h8a1 1 0 100-2H6z" clipRule="evenodd" />
                   </svg>
                 }
+<<<<<<< HEAD
 >>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
               />
               <MetricCard
@@ -1203,6 +1254,8 @@ export default function Dashboard() {
                 value={formatCurrency(parseFloat(stats.savings))}
                 sublabel="from cancelled services"
                 icon={<IconSavings />}
+=======
+>>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
               />
               <MetricCard
                 label="Active Subscriptions"
@@ -1235,12 +1288,15 @@ export default function Dashboard() {
                     <path fillRule="evenodd" d="M4 4a2 2 0 00-2 2v4a2 2 0 002 2V6h10a2 2 0 00-2-2H4zm2 6a2 2 0 012-2h8a2 2 0 012 2v4a2 2 0 01-2 2H8a2 2 0 01-2-2v-4zm6 4a2 2 0 100-4 2 2 0 000 4z" clipRule="evenodd" />
                   </svg>
                 }
+<<<<<<< HEAD
               />
               <MetricCard
                 label="Departments"
                 value={departmentMetrics.length.toString()}
                 sublabel="active departments"
                 icon={<IconDepartment />}
+=======
+>>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
               />
             </div>
 
@@ -1324,6 +1380,7 @@ export default function Dashboard() {
                 </select>
 
                 <select
+<<<<<<< HEAD
                   value={departmentFilter}
                   onChange={e => setDepartmentFilter(e.target.value)}
                   style={selectStyle}
@@ -1335,6 +1392,8 @@ export default function Dashboard() {
                 </select>
 
                 <select
+=======
+>>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
                   value={paymentFilter}
                   onChange={e => setPaymentFilter(e.target.value as any)}
                   style={{
@@ -1381,13 +1440,17 @@ export default function Dashboard() {
                     active={viewMode === 'analytics'}
                     onClick={() => setViewMode('analytics')}
 <<<<<<< HEAD
+<<<<<<< HEAD
                   >
                     <IconBars />
 =======
+=======
+>>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
                     last>
                     <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor">
                       <path d="M2 11a1 1 0 011-1h2a1 1 0 011 1v5a1 1 0 01-1 1H3a1 1 0 01-1-1v-5zM8 7a1 1 0 011-1h2a1 1 0 011 1v9a1 1 0 01-1 1H9a1 1 0 01-1-1V7zM14 4a1 1 0 011-1h2a1 1 0 011 1v12a1 1 0 01-1 1h-2a1 1 0 01-1-1V4z" />
                     </svg>
+<<<<<<< HEAD
 >>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
                   </ViewToggleButton>
                   <ViewToggleButton
@@ -1419,6 +1482,12 @@ export default function Dashboard() {
 
                 {/* Add */}
 =======
+                {/* Add Button */}
+>>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
+=======
+                  </ViewToggleButton>
+                </div>
+
                 {/* Add Button */}
 >>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
                 <button
@@ -1510,6 +1579,7 @@ export default function Dashboard() {
               />
             ) : (
 <<<<<<< HEAD
+<<<<<<< HEAD
               <ReportsView
                 subscriptions={filteredSubscriptions}
                 generateReport={generateFinancialReport}
@@ -1517,6 +1587,8 @@ export default function Dashboard() {
                 onExportReport={exportFinancialReport}
               />
 =======
+=======
+>>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
               <div style={{
                 background: '#FFFFFF',
                 border: '1px solid #E5E7EB',
@@ -1541,6 +1613,7 @@ export default function Dashboard() {
 
         {/* Modals */}
 <<<<<<< HEAD
+<<<<<<< HEAD
         {showModal && (
           <FormModal
             editingId={editingId}
@@ -1562,6 +1635,8 @@ export default function Dashboard() {
           />
         )}
 =======
+=======
+>>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
         {showModal && <FormModal
           editingId={editingId}
           formData={formData}
@@ -1579,6 +1654,9 @@ export default function Dashboard() {
           CATEGORIES={CATEGORIES}
           PAYMENT_METHODS={PAYMENT_METHODS}
         />}
+<<<<<<< HEAD
+>>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
+=======
 >>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
 
         {showDocumentsModal && selectedSubscription && <DocumentsModal
@@ -1596,6 +1674,7 @@ export default function Dashboard() {
           formatDate={formatDate}
           formatFileSize={formatFileSize}
         />}
+<<<<<<< HEAD
 
 <<<<<<< HEAD
         {showPaymentHistoryModal && selectedSubscription && (
@@ -1623,6 +1702,10 @@ export default function Dashboard() {
 =======
         {/* Help Modal */}
 >>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
+=======
+
+        {/* Help Modal */}
+>>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
         {showHelpModal && (
           <div
             style={{
@@ -1640,10 +1723,13 @@ export default function Dashboard() {
             }}
           >
 <<<<<<< HEAD
+<<<<<<< HEAD
             <div style={modalBox(800)}>
               <ModalHeader title="Enhanced Features Guide" onClose={() => setShowHelpModal(false)} />
               <div style={{ padding: '24px', maxHeight: '60vh', overflow: 'auto' }}>
 =======
+=======
+>>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
             <div style={{
               background: '#FFFFFF',
               borderRadius: '12px',
@@ -1691,10 +1777,18 @@ export default function Dashboard() {
                 }}>
                   <h3 style={{ fontSize: '16px', fontWeight: '600', color: '#5B21B6', marginBottom: '8px' }}>
 <<<<<<< HEAD
+<<<<<<< HEAD
                     🎯 Complete Financial Management
                   </h3>
                   <p style={{ fontSize: '14px', color: '#6D28D9', margin: 0 }}>
                     Track subscriptions with department allocation, budget management, and comprehensive financial reporting.
+=======
+                    🎯 Perfect for Microsoft 365, Azure, AWS & Usage-Based Services
+                  </h3>
+                  <p style={{ fontSize: '14px', color: '#6D28D9', margin: 0 }}>
+                    Track subscriptions that change monthly based on usage, user count, or consumption.
+                    The system automatically calculates averages, detects cost spikes, and maintains history.
+>>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
 =======
                     🎯 Perfect for Microsoft 365, Azure, AWS & Usage-Based Services
                   </h3>
@@ -1746,6 +1840,7 @@ export default function Dashboard() {
   );
 }
 
+<<<<<<< HEAD
 <<<<<<< HEAD
 /* =========================
    Small UI Helpers
@@ -2066,6 +2161,9 @@ const ModalHeader = ({ title, onClose }: { title: string; onClose: () => void })
 =======
 // Component: Metric Card
 >>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
+=======
+// Component: Metric Card
+>>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
 const MetricCard = ({ label, value, sublabel, trend, trendUp, alert, icon }: any) => (
   <div style={{
     background: '#FFFFFF',
@@ -2181,6 +2279,7 @@ const EmptyState = ({ onAddClick }: any) => (
 );
 
 <<<<<<< HEAD
+<<<<<<< HEAD
 /* =========================
    Feature Card (for Help Modal)
    ========================= */
@@ -2270,6 +2369,10 @@ const SubscriptionCard = ({
 // Component: Subscription Card
 const SubscriptionCard = ({ subscription: sub, onEdit, onDelete, onViewDocuments, onMarkPaid, onUpload, formatCurrency, formatDate, getCompanyColor }: any) => {
 >>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
+=======
+// Component: Subscription Card
+const SubscriptionCard = ({ subscription: sub, onEdit, onDelete, onViewDocuments, onMarkPaid, onUpload, formatCurrency, formatDate, getCompanyColor }: any) => {
+>>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
   const getStatusColor = (status: string) => {
     switch (status) {
       case 'active': return { bg: '#D1FAE5', text: '#065F46' };
@@ -2345,12 +2448,15 @@ const SubscriptionCard = ({ subscription: sub, onEdit, onDelete, onViewDocuments
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', alignItems: 'flex-end' }}>
 <<<<<<< HEAD
+<<<<<<< HEAD
             <span style={badge(statusColors)}>{sub.status.toUpperCase()}</span>
             <span style={badge(paymentColors)}>{(sub.lastPaymentStatus || 'pending').toUpperCase()}</span>
             {sub.autoRenew && (
               <span style={badge({ bg: '#E0E7FF', text: '#3730A3' })}>AUTO-RENEW</span>
             )}
 =======
+=======
+>>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
             <span style={{
               padding: '2px 8px',
               borderRadius: '12px',
@@ -2371,6 +2477,9 @@ const SubscriptionCard = ({ subscription: sub, onEdit, onDelete, onViewDocuments
             }}>
               {(sub.lastPaymentStatus || 'pending').toUpperCase()}
             </span>
+<<<<<<< HEAD
+>>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
+=======
 >>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
           </div>
         </div>
@@ -2415,8 +2524,12 @@ const SubscriptionCard = ({ subscription: sub, onEdit, onDelete, onViewDocuments
         <DetailRow label="Category" value={sub.category} />
         {sub.manager && <DetailRow label="Manager" value={sub.manager} />}
 <<<<<<< HEAD
+<<<<<<< HEAD
         {sub.accountNumber && <DetailRow label="Account #" value={sub.accountNumber} />}
         <DetailRow label="Documents" value={`${sub.attachments?.length ?? sub.attachment_count ?? 0} files`} />
+=======
+        <DetailRow label="Documents" value={`${sub.attachments?.length || 0} files`} />
+>>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
 =======
         <DetailRow label="Documents" value={`${sub.attachments?.length || 0} files`} />
 >>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
@@ -2455,6 +2568,7 @@ const SubscriptionCard = ({ subscription: sub, onEdit, onDelete, onViewDocuments
         )}
 
 <<<<<<< HEAD
+<<<<<<< HEAD
         <ActionButton onClick={onLogCost}>
           <svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor">
             <path d="M4 3a1 1 0 000 2h12a1 1 0 100-2H4zM3 8a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm1 4a1 1 0 000 2h12a1 1 0 100-2H4zm-1 5a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1z" />
@@ -2473,6 +2587,8 @@ const SubscriptionCard = ({ subscription: sub, onEdit, onDelete, onViewDocuments
           }}
         >
 =======
+=======
+>>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
         <label style={{
           padding: '6px',
           border: '1px solid #E5E7EB',
@@ -2496,6 +2612,9 @@ const SubscriptionCard = ({ subscription: sub, onEdit, onDelete, onViewDocuments
           e.currentTarget.style.background = '#FFFFFF';
           e.currentTarget.style.borderColor = '#E5E7EB';
         }}>
+<<<<<<< HEAD
+>>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
+=======
 >>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
           <svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor">
             <path fillRule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zM6.293 6.707a1 1 0 010-1.414l3-3a1 1 0 011.414 0l3 3a1 1 0 11-1.414 1.414L11 5.414V13a1 1 0 11-2 0V5.414L7.707 6.707a1 1 0 01-1.414 0z" clipRule="evenodd" />
@@ -2573,6 +2692,7 @@ const ActionButton = ({ onClick, children, primary, success, danger }: any) => {
 };
 
 <<<<<<< HEAD
+<<<<<<< HEAD
 /* =========================
    Table View - ENHANCED (Part 2)
    ========================= */
@@ -2591,6 +2711,8 @@ const TableView = ({
   getCompanyColor
 }: any) => (
 =======
+=======
+>>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
 // Component: Table View
 const TableView = ({ subscriptions, onEdit, onDelete, onMarkPaid, onUpload, onViewDocuments, formatCurrency, formatDate, getCompanyColor }: any) => (
 >>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
@@ -2605,6 +2727,7 @@ const TableView = ({ subscriptions, onEdit, onDelete, onMarkPaid, onUpload, onVi
         <thead>
           <tr style={{ background: '#F9FAFB', borderBottom: '1px solid #E5E7EB' }}>
 <<<<<<< HEAD
+<<<<<<< HEAD
             <th style={th}>Company</th>
             <th style={th}>Service</th>
             <th style={th}>Department</th>
@@ -2615,6 +2738,16 @@ const TableView = ({ subscriptions, onEdit, onDelete, onMarkPaid, onUpload, onVi
             <th style={th}>Next Billing</th>
             <th style={th}>Manager</th>
             <th style={{ ...th, textAlign: 'right' }}>Actions</th>
+=======
+            <th style={{ padding: '12px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#374151' }}>Company</th>
+            <th style={{ padding: '12px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#374151' }}>Service</th>
+            <th style={{ padding: '12px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#374151' }}>Cost</th>
+            <th style={{ padding: '12px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#374151' }}>Status</th>
+            <th style={{ padding: '12px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#374151' }}>Payment</th>
+            <th style={{ padding: '12px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#374151' }}>Next Billing</th>
+            <th style={{ padding: '12px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#374151' }}>Manager</th>
+            <th style={{ padding: '12px 16px', textAlign: 'right', fontSize: '12px', fontWeight: '600', color: '#374151' }}>Actions</th>
+>>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
           </tr>
         </thead>
         <tbody>
@@ -2893,6 +3026,7 @@ const PaymentStatusBadge = ({ status }: any) => {
 };
 
 <<<<<<< HEAD
+<<<<<<< HEAD
 /* =========================
    Form Modal - ENHANCED (Part 3)
    ========================= */
@@ -2906,6 +3040,8 @@ const FormModal = ({
   <div style={backdrop} onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
     <div style={modalBox(700)}>
 =======
+=======
+>>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
 // Component: Form Modal
 const FormModal = ({ editingId, formData, setFormData, currentTags, tagInput, setTagInput, onSubmit, onClose, onAddTag, onRemoveTag, onFileUpload, formatFileSize, COMPANIES, CATEGORIES, PAYMENT_METHODS }: any) => (
   <div
@@ -2932,6 +3068,9 @@ const FormModal = ({ editingId, formData, setFormData, currentTags, tagInput, se
       overflow: 'auto',
       boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.25)'
     }}>
+<<<<<<< HEAD
+>>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
+=======
 >>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
       <div style={{
         padding: '24px',
@@ -3279,6 +3418,9 @@ const FormModal = ({ editingId, formData, setFormData, currentTags, tagInput, se
             />
           </FormField>
 
+<<<<<<< HEAD
+>>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
+=======
 >>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
           <FormField label="Tags">
             <div style={{ display: 'flex', gap: '8px', marginBottom: '8px' }}>
@@ -3379,10 +3521,13 @@ const FormModal = ({ editingId, formData, setFormData, currentTags, tagInput, se
           <button
             type="submit"
 <<<<<<< HEAD
+<<<<<<< HEAD
             style={{ ...primaryBtn, flex: 1, padding: '10px' }}
             onMouseEnter={e => e.currentTarget.style.background = '#4338CA'}
             onMouseLeave={e => e.currentTarget.style.background = '#4F46E5'}
 =======
+=======
+>>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
             style={{
               flex: 1,
               padding: '10px',
@@ -3394,6 +3539,9 @@ const FormModal = ({ editingId, formData, setFormData, currentTags, tagInput, se
               fontWeight: '500',
               cursor: 'pointer'
             }}
+<<<<<<< HEAD
+>>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
+=======
 >>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
           >
             {editingId !== null ? 'Update Subscription' : 'Add Subscription'}
@@ -3575,6 +3723,7 @@ const DocumentsModal = ({ subscription, onClose, onUpload, onDownload, formatDat
   </div>
 );
 
+<<<<<<< HEAD
 <<<<<<< HEAD
 /* =========================
    Payment History Modal
@@ -3868,6 +4017,9 @@ const ChartCard = ({ title, data, labelKey, valueKey, formatCurrency }: any) => 
    Form Field & Input Style
    ========================= */
 
+=======
+// Helper: Form Field Component
+>>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
 =======
 // Helper: Form Field Component
 >>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)

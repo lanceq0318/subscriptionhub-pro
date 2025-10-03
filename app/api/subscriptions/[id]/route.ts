@@ -138,10 +138,13 @@ export async function PATCH(req: Request, { params }: { params: { id: string } }
   try {
 <<<<<<< HEAD
 <<<<<<< HEAD
+<<<<<<< HEAD
     return await updateSubscription(req, params.id);
   } catch (err) {
     console.error('Failed to update subscription:', err);
 =======
+=======
+>>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
     const id = parseInt(params.id);
     const body = await request.json();
     const {
@@ -273,6 +276,7 @@ export async function DELETE(
 ) {
   try {
 <<<<<<< HEAD
+<<<<<<< HEAD
     const id = Number.parseInt(params.id, 10);
     if (!Number.isFinite(id)) {
       return NextResponse.json({ error: 'Invalid id' }, { status: 400 });
@@ -281,6 +285,10 @@ export async function DELETE(
     // ON DELETE CASCADE on FKs will clean up related rows
     await sql`DELETE FROM subscriptions WHERE id = ${id}`;
 
+=======
+    const id = parseInt(params.id);
+    await sql`DELETE FROM subscriptions WHERE id = ${id}`;
+>>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
 =======
     const id = parseInt(params.id);
     await sql`DELETE FROM subscriptions WHERE id = ${id}`;
@@ -294,11 +302,15 @@ export async function DELETE(
     );
   }
 <<<<<<< HEAD
+<<<<<<< HEAD
 >>>>>>> parent of fdb4560 (Imporvement)
 }
 
 // If you run on Edge with Neon HTTP, you can uncomment:
 // export const runtime = 'edge';
+=======
+}
+>>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
 =======
 }
 >>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)

@@ -127,10 +127,13 @@ export async function GET() {
       SELECT 
         s.*,
 <<<<<<< HEAD
+<<<<<<< HEAD
         ARRAY_AGG(DISTINCT t.tag) FILTER (WHERE t.tag IS NOT NULL) AS tags,
         COUNT(DISTINCT a.id) AS attachment_count,
         JSON_AGG(DISTINCT JSONB_BUILD_OBJECT(
 =======
+=======
+>>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
         array_agg(DISTINCT t.tag) FILTER (WHERE t.tag IS NOT NULL) as tags,
         COUNT(DISTINCT a.id) as attachment_count,
         json_agg(DISTINCT jsonb_build_object(
@@ -142,6 +145,7 @@ export async function GET() {
           'method', p.method,
           'reference', p.reference
 <<<<<<< HEAD
+<<<<<<< HEAD
         )) FILTER (WHERE p.id IS NOT NULL) AS payments
 >>>>>>> parent of fdb4560 (Imporvement)
       FROM subscriptions s
@@ -149,6 +153,8 @@ export async function GET() {
       LEFT JOIN payment_history ph ON ph.subscription_id = s.id
       ORDER BY s.id DESC
 =======
+=======
+>>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
         )) FILTER (WHERE p.id IS NOT NULL) as payments
       FROM subscriptions s
       LEFT JOIN subscription_tags t ON s.id = t.subscription_id
@@ -156,6 +162,9 @@ export async function GET() {
       LEFT JOIN payments p ON s.id = p.subscription_id
       GROUP BY s.id
       ORDER BY s.created_at DESC
+<<<<<<< HEAD
+>>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
+=======
 >>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
     `;
 
@@ -190,6 +199,7 @@ export async function POST(request: Request) {
     const result = await sql`
 =======
     const {
+<<<<<<< HEAD
 <<<<<<< HEAD
       company,
       service,
@@ -269,10 +279,34 @@ export async function POST(request: Request) {
       ) RETURNING id
     `;
 
+=======
+      company, service, cost, billing, nextBilling, contractEnd,
+      category, manager, renewalAlert, status, paymentMethod,
+      usage, notes, tags, lastPaymentStatus
+    } = body;
+
+    // Insert subscription
+    const { rows } = await sql`
+      INSERT INTO subscriptions (
+        company, service, cost, billing, next_billing, contract_end,
+        category, manager, renewal_alert, status, payment_method,
+        usage, notes, last_payment_status
+      ) VALUES (
+        ${company}, ${service}, ${cost}, ${billing}, ${nextBilling || null},
+        ${contractEnd || null}, ${category || null}, ${manager || null},
+        ${renewalAlert || 30}, ${status || 'active'}, ${paymentMethod || null},
+        ${usage || null}, ${notes || null}, ${lastPaymentStatus || 'pending'}
+      ) RETURNING id
+    `;
+
+>>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
     const subscriptionId = rows[0].id;
 
     // Insert tags
     if (tags && tags.length > 0) {
+<<<<<<< HEAD
+>>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
+=======
 >>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
       for (const tag of tags) {
         await sql`

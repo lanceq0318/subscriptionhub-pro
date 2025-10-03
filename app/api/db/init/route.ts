@@ -7,6 +7,7 @@ import { sql } from '@/app/lib/db';
 export async function POST() {
   try {
 <<<<<<< HEAD
+<<<<<<< HEAD
     const db = sql();
 
     // subscriptions
@@ -40,6 +41,8 @@ export async function POST() {
     // payments
     await db`
 =======
+=======
+>>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
     // Create subscriptions table
     await sql`
       CREATE TABLE IF NOT EXISTS subscriptions (
@@ -103,6 +106,7 @@ export async function POST() {
     `;
 
 <<<<<<< HEAD
+<<<<<<< HEAD
     // per-month actuals for variable/fixed subs
     await db`
       CREATE TABLE IF NOT EXISTS subscription_costs (
@@ -122,6 +126,8 @@ export async function POST() {
   } catch (err: any) {
     return NextResponse.json({ ok: false, error: err.message }, { status: 500 });
 =======
+=======
+>>>>>>> parent of b79e0e7 (Complete subscription tracker with authentication and database)
     return NextResponse.json({ message: 'Database initialized successfully' });
   } catch (error) {
     console.error('Database initialization error:', error);
