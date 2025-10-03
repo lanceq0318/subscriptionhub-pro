@@ -1,5 +1,3 @@
-<<<<<<< HEAD
-// app/lib/api.ts
 export type Payment = {
   id?: string;
   date: string;
@@ -10,45 +8,41 @@ export type Payment = {
   reference?: string;
 };
 
-=======
->>>>>>> parent of fdb4560 (Imporvement)
 export const api = {
   async getSubscriptions() {
-    const res = await fetch('/api/subscriptions');
+    const res = await fetch('/api/subscriptions', { cache: 'no-store' });
     if (!res.ok) throw new Error('Failed to fetch subscriptions');
     return res.json();
   },
 
-  async createSubscription(data: any) {
+  async createSubscription(payload: any) {
     const res = await fetch('/api/subscriptions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(data),
+      body: JSON.stringify(payload),
     });
     if (!res.ok) throw new Error('Failed to create subscription');
     return res.json();
   },
 
-  async updateSubscription(id: number, data: any) {
+  async updateSubscription(id: number, payload: any) {
     const res = await fetch(`/api/subscriptions/${id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(data),
+      body: JSON.stringify(payload),
     });
     if (!res.ok) throw new Error('Failed to update subscription');
     return res.json();
   },
 
   async deleteSubscription(id: number) {
-    const res = await fetch(`/api/subscriptions/${id}`, {
-      method: 'DELETE',
-    });
+    const res = await fetch(`/api/subscriptions/${id}`, { method: 'DELETE' });
     if (!res.ok) throw new Error('Failed to delete subscription');
     return res.json();
   },
 
-  async markAsPaid(id: number, payment: any) {
-    const res = await fetch(`/api/subscriptions/${id}/payment`, {
+  async markAsPaid(id: number, payment: Payment) {
+    const res = await fetch(`/api/subscriptions/${id}/pay`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payment),
@@ -56,33 +50,4 @@ export const api = {
     if (!res.ok) throw new Error('Failed to mark as paid');
     return res.json();
   },
-<<<<<<< HEAD
-
-  // ===== Variable costs =====
-  async getSubscriptionCosts(id: number) {
-    const res = await fetch(`/api/subscriptions/${id}/costs`, { cache: 'no-store' });
-    if (!res.ok) throw new Error('Failed to fetch costs');
-    return res.json();
-  },
-
-  async upsertSubscriptionCost(id: number, payload: { period: string; amount: number; currency?: string; source?: string; notes?: string; }) {
-    const res = await fetch(`/api/subscriptions/${id}/costs`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-    if (!res.ok) throw new Error('Failed to upsert cost');
-    return res.json();
-  },
-
-  async deleteSubscriptionCost(id: number, period: string) {
-    const res = await fetch(`/api/subscriptions/${id}/costs?period=${encodeURIComponent(period)}`, {
-      method: 'DELETE',
-    });
-    if (!res.ok) throw new Error('Failed to delete cost');
-    return res.json();
-  },
 };
-=======
-};
->>>>>>> parent of fdb4560 (Imporvement)
