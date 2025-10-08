@@ -11,18 +11,24 @@ type Action =
 
 export async function POST(req: Request) {
   try {
-    const body = await req.json() as Action;
+    const body = (await req.json()) as Action;
     const ids = (body as any).ids;
     if (!Array.isArray(ids) || !ids.length) {
       return NextResponse.json({ error: 'No ids provided' }, { status: 400 });
     }
     const idList = ids.map(Number).filter(n => Number.isInteger(n));
+    if (!idList.length) {
+      return NextResponse.json({ error: 'No valid ids' }, { status: 400 });
+    }
+
+    // Use sql.array(...) so ANY(...) receives a properly-typed array (int4[])
+    const idArr = sql.array(idList, 'int4');
 
     if (body.type === 'delete') {
-      await sql`DELETE FROM payments WHERE subscription_id = ANY(${idList})`;
-      await sql`DELETE FROM attachments WHERE subscription_id = ANY(${idList})`;
-      await sql`DELETE FROM subscription_tags WHERE subscription_id = ANY(${idList})`;
-      await sql`DELETE FROM subscriptions WHERE id = ANY(${idList})`;
+      await sql`DELETE FROM payments WHERE subscription_id = ANY(${idArr})`;
+      await sql`DELETE FROM attachments WHERE subscription_id = ANY(${idArr})`;
+      await sql`DELETE FROM subscription_tags WHERE subscription_id = ANY(${idArr})`;
+      await sql`DELETE FROM subscriptions WHERE id = ANY(${idArr})`;
       return NextResponse.json({ success: true, count: idList.length });
     }
 
@@ -30,7 +36,7 @@ export async function POST(req: Request) {
       await sql`
         UPDATE subscriptions
         SET status = ${body.status}, updated_at = NOW()
-        WHERE id = ANY(${idList})
+        WHERE id = ANY(${idArr})
       `;
       return NextResponse.json({ success: true, count: idList.length });
     }
@@ -43,7 +49,10 @@ export async function POST(req: Request) {
     }
 
     if (body.type === 'removeTag') {
-      await sql`DELETE FROM subscription_tags WHERE subscription_id = ANY(${idList}) AND tag = ${body.tag}`;
+      await sql`
+        DELETE FROM subscription_tags
+        WHERE subscription_id = ANY(${idArr}) AND tag = ${body.tag}
+      `;
       return NextResponse.json({ success: true, count: idList.length });
     }
 
