@@ -2,6 +2,8 @@ import { NextResponse } from 'next/server';
 import { sql } from '@vercel/postgres';
 import { AttachmentTypeEnum } from '@/app/lib/validation';
 
+export const runtime = 'nodejs';
+
 export async function GET(
   _req: Request,
   { params }: { params: { id: string } }
@@ -70,16 +72,22 @@ export async function POST(
     const nameOverride = form.get('name');
     const filename = typeof nameOverride === 'string' && nameOverride.trim() ? nameOverride.trim() : file.name;
     const mimeType = file.type || null;
+
     const arrayBuffer = await file.arrayBuffer();
     const buffer = Buffer.from(arrayBuffer);
+    // TS typing workaround: @vercel/postgres template param is typed as Primitive; cast Buffer for TS.
+    const pgBuffer: any = buffer;
 
     const { rows } = await sql<{ id: number }>`
       INSERT INTO attachments (subscription_id, name, type, size, mime_type, data)
-      VALUES (${subscriptionId}, ${filename}, ${type}, ${file.size || null}, ${mimeType}, ${buffer})
+      VALUES (${subscriptionId}, ${filename}, ${type}, ${file.size || null}, ${mimeType}, ${pgBuffer})
       RETURNING id
     `;
 
-    return NextResponse.json({ id: rows[0].id, name: filename, type, size: file.size, mimeType }, { status: 201 });
+    return NextResponse.json(
+      { id: rows[0].id, name: filename, type, size: file.size, mimeType },
+      { status: 201 }
+    );
   } catch (e) {
     console.error('Upload attachment failed', e);
     return NextResponse.json({ error: 'Failed to upload attachment' }, { status: 500 });
