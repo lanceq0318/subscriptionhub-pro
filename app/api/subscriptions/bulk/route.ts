@@ -5,7 +5,7 @@ export const runtime = 'nodejs';
 
 type Action =
   | { type: 'delete'; ids: number[] }
-  | { type: 'status'; ids: number[]; status: 'active'|'pending'|'cancelled' }
+  | { type: 'status'; ids: number[]; status: 'active' | 'pending' | 'cancelled' }
   | { type: 'addTag'; ids: number[]; tag: string }
   | { type: 'removeTag'; ids: number[]; tag: string };
 
@@ -21,8 +21,8 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'No valid ids' }, { status: 400 });
     }
 
-    // Use sql.array(...) so ANY(...) receives a properly-typed array (int4[])
-    const idArr = sql.array(idList, 'int4');
+    // Use sql.array(...) to ensure proper type casting to 'int4[]'
+    const idArr = sql.array(idList, 'int4'); // Casting to an integer array
 
     if (body.type === 'delete') {
       await sql`DELETE FROM payments WHERE subscription_id = ANY(${idArr})`;
