@@ -1,13 +1,6 @@
 import { sql } from '@vercel/postgres';
 import { NextResponse } from 'next/server';
-
-type PaymentInput = {
-  date: string;                       // ISO string from client
-  amount: number;
-  status: 'paid' | 'pending' | 'overdue';
-  method?: string | null;
-  reference?: string | null;
-};
+import { PaymentSchema, parseJson } from '@/app/lib/validation';
 
 export async function POST(
   request: Request,
@@ -19,49 +12,37 @@ export async function POST(
       return NextResponse.json({ error: 'Invalid id' }, { status: 400 });
     }
 
-    const body = (await request.json()) as PaymentInput;
-
-    // Basic validation
-    if (!body || !body.date || typeof body.amount !== 'number' || !body.status) {
-      return NextResponse.json({ error: 'Invalid payload' }, { status: 400 });
+    const json = await parseJson<any>(request);
+    const parsed = PaymentSchema.safeParse(json);
+    if (!parsed.success) {
+      return NextResponse.json({ error: 'Invalid payload', details: parsed.error.flatten() }, { status: 400 });
     }
 
-    const paymentDate = new Date(body.date);
+    const { date, amount, status, method, reference } = parsed.data;
 
-    // 1) Insert the payment
     await sql`
       INSERT INTO payments (subscription_id, payment_date, amount, status, method, reference)
-      VALUES (${id}, ${paymentDate.toISOString()}, ${body.amount}, ${body.status}, ${body.method || null}, ${body.reference || null})
+      VALUES (${id}, ${date}, ${amount}, ${status}, ${method || null}, ${reference || null})
     `;
 
-    // 2) Update subscription payment status
+    // Always set last_payment_status to the provided status
     await sql`
       UPDATE subscriptions
-      SET last_payment_status = ${body.status}, updated_at = NOW()
+      SET last_payment_status = ${status}, updated_at = NOW()
       WHERE id = ${id}
     `;
 
-    // 3) If paid, roll next_billing forward based on billing cycle
-    if (body.status === 'paid') {
-      // monthly
-      await sql`
-        UPDATE subscriptions
-        SET next_billing = COALESCE(next_billing, CURRENT_DATE) + INTERVAL '1 month'
-        WHERE id = ${id} AND billing = 'monthly'
-      `;
-      // quarterly
-      await sql`
-        UPDATE subscriptions
-        SET next_billing = COALESCE(next_billing, CURRENT_DATE) + INTERVAL '3 months'
-        WHERE id = ${id} AND billing = 'quarterly'
-      `;
-      // yearly
-      await sql`
-        UPDATE subscriptions
-        SET next_billing = COALESCE(next_billing, CURRENT_DATE) + INTERVAL '1 year'
-        WHERE id = ${id} AND billing = 'yearly'
-      `;
-    }
+    // advance next_billing based on billing cadence
+    await sql`
+      UPDATE subscriptions
+      SET next_billing = COALESCE(next_billing, CURRENT_DATE) + CASE billing
+        WHEN 'monthly' THEN INTERVAL '1 month'
+        WHEN 'quarterly' THEN INTERVAL '3 months'
+        WHEN 'yearly' THEN INTERVAL '1 year'
+        ELSE INTERVAL '1 month'
+      END
+      WHERE id = ${id}
+    `;
 
     return NextResponse.json({ success: true });
   } catch (error) {

@@ -1,5 +1,6 @@
 import { sql } from '@vercel/postgres';
 import { NextResponse } from 'next/server';
+import { SubscriptionCreateSchema, parseJson } from '@/app/lib/validation';
 
 export async function GET() {
   try {
@@ -23,23 +24,26 @@ export async function GET() {
         s.updated_at        AS "updatedAt",
         ARRAY_AGG(DISTINCT t.tag) FILTER (WHERE t.tag IS NOT NULL) AS "tags",
         COUNT(DISTINCT a.id) AS "attachmentCount",
-        JSON_AGG(DISTINCT JSONB_BUILD_OBJECT(
-          'id', p.id,
-          'date', p.payment_date,
-          'amount', p.amount,
-          'status', p.status,
-          'method', p.method,
-          'reference', p.reference
-        )) FILTER (WHERE p.id IS NOT NULL) AS "payments"
+        COALESCE(
+          JSON_AGG(DISTINCT JSONB_BUILD_OBJECT(
+            'id', p.id,
+            'date', p.payment_date,
+            'amount', p.amount,
+            'status', p.status,
+            'method', p.method,
+            'reference', p.reference
+          )) FILTER (WHERE p.id IS NOT NULL),
+          '[]'::json
+        ) AS "payments"
       FROM subscriptions s
-      LEFT JOIN subscription_tags t ON s.id = t.subscription_id
-      LEFT JOIN attachments a ON s.id = a.subscription_id
-      LEFT JOIN payments p ON s.id = p.subscription_id
+      LEFT JOIN subscription_tags t ON t.subscription_id = s.id
+      LEFT JOIN payments p ON p.subscription_id = s.id
+      LEFT JOIN attachments a ON a.subscription_id = s.id
       GROUP BY s.id
       ORDER BY s.created_at DESC
     `;
 
-    const normalized = (rows || []).map((s: any) => ({
+    const normalized = rows.map((s: any) => ({
       ...s,
       cost: typeof s.cost === 'string' ? Number(s.cost) : s.cost,
       attachmentCount:
@@ -48,7 +52,7 @@ export async function GET() {
         ? s.payments.map((p: any) => ({
             ...p,
             amount: typeof p?.amount === 'string' ? Number(p.amount) : p?.amount,
-            date: p?.date, // already aliased as 'date' in JSONB_BUILD_OBJECT
+            date: p?.date,
           }))
         : [],
     }));
@@ -62,38 +66,17 @@ export async function GET() {
 
 export async function POST(request: Request) {
   try {
-    const body = await request.json();
+    const json = await parseJson<any>(request);
+    const parsed = SubscriptionCreateSchema.safeParse(json);
+    if (!parsed.success) {
+      return NextResponse.json({ error: 'Invalid payload', details: parsed.error.flatten() }, { status: 400 });
+    }
     const {
-      company,
-      service,
-      cost,
-      billing,
-      nextBilling,
-      contractEnd,
-      category,
-      manager,
-      renewalAlert,
-      status,
-      paymentMethod,
-      notes,
-      tags,
-      lastPaymentStatus,
-    } = body as {
-      company: string;
-      service: string;
-      cost: number;
-      billing: 'monthly' | 'yearly' | 'quarterly';
-      nextBilling?: string | null;
-      contractEnd?: string | null;
-      category?: string | null;
-      manager?: string | null;
-      renewalAlert?: number;
-      status?: 'active' | 'pending' | 'cancelled';
-      paymentMethod?: string | null;
-      notes?: string | null;
-      tags?: string[];
-      lastPaymentStatus?: 'paid' | 'pending' | 'overdue';
-    };
+      company, service, cost, billing,
+      nextBilling, contractEnd,
+      category, manager, renewalAlert,
+      status, paymentMethod, tags, notes,
+    } = parsed.data;
 
     const { rows } = await sql<{ id: number }>`
       INSERT INTO subscriptions (
@@ -103,26 +86,25 @@ export async function POST(request: Request) {
       ) VALUES (
         ${company}, ${service}, ${cost}, ${billing},
         ${nextBilling || null}, ${contractEnd || null},
-        ${category || null}, ${manager || null},
-        ${renewalAlert ?? 30}, ${status || 'active'},
-        ${paymentMethod || null}, ${notes || null},
-        ${lastPaymentStatus || 'pending'}
+        ${category || null}, ${manager || null}, ${renewalAlert ?? 30},
+        ${status || 'active'}, ${paymentMethod || null},
+        ${notes || null}, 'pending'
       )
       RETURNING id
     `;
 
-    const subscriptionId = rows[0].id;
+    const id = rows[0].id;
 
     if (Array.isArray(tags) && tags.length > 0) {
       for (const tag of tags) {
         await sql`
           INSERT INTO subscription_tags (subscription_id, tag)
-          VALUES (${subscriptionId}, ${tag})
+          VALUES (${id}, ${tag})
         `;
       }
     }
 
-    return NextResponse.json({ id: subscriptionId, ...body });
+    return NextResponse.json({ id }, { status: 201 });
   } catch (error) {
     console.error('Error creating subscription:', error);
     return NextResponse.json({ error: 'Failed to create subscription' }, { status: 500 });

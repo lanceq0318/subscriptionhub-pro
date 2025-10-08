@@ -1,5 +1,6 @@
 import { sql } from '@vercel/postgres';
 import { NextResponse } from 'next/server';
+import { SubscriptionUpdateSchema, parseJson } from '@/app/lib/validation';
 
 export async function PUT(
   request: Request,
@@ -11,66 +12,48 @@ export async function PUT(
       return NextResponse.json({ error: 'Invalid id' }, { status: 400 });
     }
 
-    const body = await request.json();
+    const json = await parseJson<any>(request);
+    const parsed = SubscriptionUpdateSchema.safeParse(json);
+    if (!parsed.success) {
+      return NextResponse.json({ error: 'Invalid payload', details: parsed.error.flatten() }, { status: 400 });
+    }
+
     const {
-      company,
-      service,
-      cost,
-      billing,
-      nextBilling,
-      contractEnd,
-      category,
-      manager,
-      renewalAlert,
-      status,
-      paymentMethod,
-      notes,
-      tags,
+      company, service, cost, billing,
+      nextBilling, contractEnd, category, manager,
+      renewalAlert, status, paymentMethod, tags, notes,
       lastPaymentStatus,
-    } = body as {
-      company?: string;
-      service?: string;
-      cost?: number;
-      billing?: 'monthly' | 'yearly' | 'quarterly';
-      nextBilling?: string | null;
-      contractEnd?: string | null;
-      category?: string | null;
-      manager?: string | null;
-      renewalAlert?: number;
-      status?: 'active' | 'pending' | 'cancelled';
-      paymentMethod?: string | null;
-      notes?: string | null;
-      tags?: string[];
-      lastPaymentStatus?: 'paid' | 'pending' | 'overdue';
-    };
+    } = parsed.data;
 
     await sql`
       UPDATE subscriptions
       SET
-        company = ${company},
-        service = ${service},
-        cost = ${cost},
-        billing = ${billing},
-        next_billing = ${nextBilling || null},
-        contract_end = ${contractEnd || null},
-        category = ${category || null},
-        manager = ${manager || null},
-        renewal_alert = ${renewalAlert ?? 30},
-        status = ${status || 'active'},
-        payment_method = ${paymentMethod || null},
-        notes = ${notes || null},
-        last_payment_status = ${lastPaymentStatus || 'pending'},
+        company = COALESCE(${company}, company),
+        service = COALESCE(${service}, service),
+        cost = COALESCE(${cost}, cost),
+        billing = COALESCE(${billing}, billing),
+        next_billing = COALESCE(${nextBilling || null}, next_billing),
+        contract_end = COALESCE(${contractEnd || null}, contract_end),
+        category = COALESCE(${category || null}, category),
+        manager = COALESCE(${manager || null}, manager),
+        renewal_alert = COALESCE(${renewalAlert ?? null}, renewal_alert),
+        status = COALESCE(${status || null}, status),
+        payment_method = COALESCE(${paymentMethod || null}, payment_method),
+        notes = COALESCE(${notes || null}, notes),
+        last_payment_status = COALESCE(${lastPaymentStatus || null}, last_payment_status),
         updated_at = NOW()
       WHERE id = ${id}
     `;
 
-    await sql`DELETE FROM subscription_tags WHERE subscription_id = ${id}`;
-    if (Array.isArray(tags) && tags.length > 0) {
-      for (const tag of tags) {
-        await sql`
-          INSERT INTO subscription_tags (subscription_id, tag)
-          VALUES (${id}, ${tag})
-        `;
+    if (Array.isArray(tags)) {
+      await sql`DELETE FROM subscription_tags WHERE subscription_id = ${id}`;
+      if (tags.length) {
+        for (const tag of tags) {
+          await sql`
+            INSERT INTO subscription_tags (subscription_id, tag)
+            VALUES (${id}, ${tag})
+          `;
+        }
       }
     }
 
