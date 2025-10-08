@@ -21,14 +21,14 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'No valid ids' }, { status: 400 });
     }
 
-    // Directly use the array in SQL queries
+    // Use the array directly in SQL queries (no need for sql.raw or sql.array)
     const idListStr = idList.join(',');
 
     if (body.type === 'delete') {
-      await sql`DELETE FROM payments WHERE subscription_id = ANY(${sql.raw(idListStr)})`;
-      await sql`DELETE FROM attachments WHERE subscription_id = ANY(${sql.raw(idListStr)})`;
-      await sql`DELETE FROM subscription_tags WHERE subscription_id = ANY(${sql.raw(idListStr)})`;
-      await sql`DELETE FROM subscriptions WHERE id = ANY(${sql.raw(idListStr)})`;
+      await sql`DELETE FROM payments WHERE subscription_id = ANY(${idListStr})`;
+      await sql`DELETE FROM attachments WHERE subscription_id = ANY(${idListStr})`;
+      await sql`DELETE FROM subscription_tags WHERE subscription_id = ANY(${idListStr})`;
+      await sql`DELETE FROM subscriptions WHERE id = ANY(${idListStr})`;
       return NextResponse.json({ success: true, count: idList.length });
     }
 
@@ -36,7 +36,7 @@ export async function POST(req: Request) {
       await sql`
         UPDATE subscriptions
         SET status = ${body.status}, updated_at = NOW()
-        WHERE id = ANY(${sql.raw(idListStr)})
+        WHERE id = ANY(${idListStr})
       `;
       return NextResponse.json({ success: true, count: idList.length });
     }
@@ -51,7 +51,7 @@ export async function POST(req: Request) {
     if (body.type === 'removeTag') {
       await sql`
         DELETE FROM subscription_tags
-        WHERE subscription_id = ANY(${sql.raw(idListStr)}) AND tag = ${body.tag}
+        WHERE subscription_id = ANY(${idListStr}) AND tag = ${body.tag}
       `;
       return NextResponse.json({ success: true, count: idList.length });
     }
