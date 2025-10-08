@@ -21,7 +21,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'No valid ids' }, { status: 400 });
     }
 
-    // Use the array directly without sql.array
+    // Directly use the array in SQL queries
     const idListStr = idList.join(',');
 
     if (body.type === 'delete') {
