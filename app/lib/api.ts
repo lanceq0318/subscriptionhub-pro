@@ -3,7 +3,6 @@ export type Payment = {
   date: string;
   amount: number;
   status: 'paid' | 'pending' | 'overdue';
-  invoiceId?: string;
   method?: string | null;
   reference?: string | null;
 };
@@ -18,8 +17,14 @@ export type AttachmentMeta = {
 };
 
 export const api = {
-  async getSubscriptions() {
-    const res = await fetch('/api/subscriptions', { cache: 'no-store' });
+  async getSubscriptions(params?: { q?: string; tag?: string; status?: string; sort?: string; order?: 'asc'|'desc' }) {
+    const qs = new URLSearchParams();
+    if (params?.q) qs.set('q', params.q);
+    if (params?.tag) qs.set('tag', params.tag);
+    if (params?.status) qs.set('status', params.status);
+    if (params?.sort) qs.set('sort', params.sort);
+    if (params?.order) qs.set('order', params.order);
+    const res = await fetch(`/api/subscriptions${qs.toString() ? `?${qs.toString()}` : ''}`, { cache: 'no-store' });
     if (!res.ok) throw new Error('Failed to fetch subscriptions');
     return res.json();
   },
@@ -109,9 +114,29 @@ export const api = {
     return res.json();
   },
 
-  /** Returns a URL that you can set as href for download or preview (inline by default) */
   downloadAttachmentUrl(subscriptionId: number, attachmentId: number, download = false) {
     const base = `/api/subscriptions/${subscriptionId}/attachments/${attachmentId}`;
     return download ? `${base}?download=1` : base;
+  },
+
+  /** Bulk actions */
+  async bulk(action: { type: 'delete'|'status'|'addTag'|'removeTag'; ids: number[]; status?: 'active'|'pending'|'cancelled'; tag?: string; }) {
+    const res = await fetch('/api/subscriptions/bulk', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(action),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err?.error || 'Bulk action failed');
+    }
+    return res.json();
+  },
+
+  /** Analytics */
+  async analyticsSummary() {
+    const res = await fetch('/api/analytics/summary', { cache: 'no-store' });
+    if (!res.ok) throw new Error('Failed to load analytics');
+    return res.json();
   },
 };

@@ -4,6 +4,16 @@ import { AttachmentTypeEnum } from '@/app/lib/validation';
 
 export const runtime = 'nodejs';
 
+const ALLOWED_MIME = new Set([
+  'application/pdf','image/png','image/jpeg','image/jpg','image/gif',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/msword','text/plain'
+]);
+
+function sanitizeFilename(name: string) {
+  return name.replace(/[\/\\<>:"|?*\x00-\x1F]/g, '_').slice(0, 200) || 'file';
+}
+
 export async function GET(
   _req: Request,
   { params }: { params: { id: string } }
@@ -33,7 +43,9 @@ export async function GET(
       mimeType: r.mime_type,
     }));
 
-    return NextResponse.json({ attachments: data });
+    return NextResponse.json({ attachments: data }, {
+      headers: { 'Cache-Control': 'no-store' }
+    });
   } catch (e) {
     console.error('List attachments failed', e);
     return NextResponse.json({ error: 'Failed to list attachments' }, { status: 500 });
@@ -51,10 +63,13 @@ export async function POST(
 
   try {
     const form = await req.formData();
-
     const file = form.get('file');
     if (!(file instanceof File)) {
       return NextResponse.json({ error: 'Missing file' }, { status: 400 });
+    }
+
+    if (file.size > 10 * 1024 * 1024) {
+      return NextResponse.json({ error: 'File too large (max 10MB)' }, { status: 413 });
     }
 
     const typeRaw = form.get('type');
@@ -64,18 +79,25 @@ export async function POST(
       return NextResponse.json({ error: 'Invalid attachment type' }, { status: 400 });
     }
 
-    // Size guard: 10 MB
-    if (file.size > 10 * 1024 * 1024) {
-      return NextResponse.json({ error: 'File too large (max 10MB)' }, { status: 413 });
+    const mimeType = file.type || null;
+    if (mimeType && !ALLOWED_MIME.has(mimeType)) {
+      return NextResponse.json({ error: `MIME not allowed: ${mimeType}` }, { status: 415 });
     }
 
     const nameOverride = form.get('name');
-    const filename = typeof nameOverride === 'string' && nameOverride.trim() ? nameOverride.trim() : file.name;
-    const mimeType = file.type || null;
+    const filenameRaw = typeof nameOverride === 'string' && nameOverride.trim() ? nameOverride.trim() : file.name;
+    const filename = sanitizeFilename(filenameRaw);
+
+    // Lightweight dedupe: same (name,size) per subscription
+    const dup = await sql<{ id: number }>`
+      SELECT id FROM attachments WHERE subscription_id=${subscriptionId} AND name=${filename} AND size=${file.size} LIMIT 1
+    `;
+    if (dup.rows.length) {
+      return NextResponse.json({ error: 'Duplicate attachment (same name & size exists)' }, { status: 409 });
+    }
 
     const arrayBuffer = await file.arrayBuffer();
     const buffer = Buffer.from(arrayBuffer);
-    // TS typing workaround: @vercel/postgres template param is typed as Primitive; cast Buffer for TS.
     const pgBuffer: any = buffer;
 
     const { rows } = await sql<{ id: number }>`
@@ -84,10 +106,7 @@ export async function POST(
       RETURNING id
     `;
 
-    return NextResponse.json(
-      { id: rows[0].id, name: filename, type, size: file.size, mimeType },
-      { status: 201 }
-    );
+    return NextResponse.json({ id: rows[0].id, name: filename, type, size: file.size, mimeType }, { status: 201 });
   } catch (e) {
     console.error('Upload attachment failed', e);
     return NextResponse.json({ error: 'Failed to upload attachment' }, { status: 500 });

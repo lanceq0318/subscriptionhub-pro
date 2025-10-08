@@ -31,13 +31,13 @@ export async function GET(
     const contentType = rec.mime_type || 'application/octet-stream';
     const headers = new Headers();
     headers.set('Content-Type', contentType);
+    headers.set('Cache-Control', 'private, max-age=0, no-store');
 
     const url = new URL(req.url);
     const download = url.searchParams.get('download');
     const disposition = download ? 'attachment' : 'inline';
     headers.set('Content-Disposition', `${disposition}; filename="${encodeURIComponent(rec.name)}"`);
 
-    // The pg driver returns bytea as Buffer
     const body: any = rec.data as any;
     const buf = Buffer.isBuffer(body) ? body : Buffer.from(body);
 
