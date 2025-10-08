@@ -1,22 +1,23 @@
-import { sql } from 'your-db-package'; // Your SQL package (e.g., pg, knex)
+// app/api/subscriptions/bulk/route.ts
 
-export async function deleteBulkSubscriptions(idList: number[]) {
+import { NextResponse } from 'next/server';  // To handle HTTP responses
+import { deleteBulkSubscriptions } from './your-sql-function';  // Import your delete function
+
+export async function DELETE(request: Request) {
   try {
-    // Convert idList to string if necessary
-    const idListStr = idList.join(',');
+    // Extract the list of IDs from the request body
+    const { idList } = await request.json();  // Assuming a JSON body with idList
 
-    // Correct use of sql.array() for PostgreSQL
-    const idArr = await sql.array(idList, 'int4'); // Casting to an integer array (int4)
+    // Call the delete function
+    const result = await deleteBulkSubscriptions(idList);
 
-    // Delete queries using the properly cast array
-    await sql`DELETE FROM payments WHERE subscription_id = ANY(${idArr})`;
-    await sql`DELETE FROM attachments WHERE subscription_id = ANY(${idArr})`;
-    await sql`DELETE FROM subscription_tags WHERE subscription_id = ANY(${idArr})`;
-    await sql`DELETE FROM subscriptions WHERE id = ANY(${idArr})`;
-
-    return { success: true };
+    if (result.success) {
+      return NextResponse.json({ message: 'Successfully deleted subscriptions' }, { status: 200 });
+    } else {
+      return NextResponse.json({ error: 'Failed to delete subscriptions' }, { status: 500 });
+    }
   } catch (error) {
-    console.error('Error during bulk delete:', error);
-    throw error;
+    console.error(error);
+    return NextResponse.json({ error: 'An error occurred' }, { status: 500 });
   }
 }
