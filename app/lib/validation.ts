@@ -23,7 +23,11 @@ export const SubscriptionCreateSchema = z.object({
   notes: z.string().optional().nullable(),
 });
 
-export const SubscriptionUpdateSchema = SubscriptionCreateSchema.partial();
+export const SubscriptionUpdateSchema = SubscriptionCreateSchema.partial().extend({
+  // This field is present on the DB row and used by the PUT route,
+  // so we expose it here as optional.
+  lastPaymentStatus: PaymentStatusEnum.optional(),
+});
 
 export const PaymentSchema = z.object({
   date: z.string().datetime(),
