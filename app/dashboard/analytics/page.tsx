@@ -3,8 +3,6 @@ import React, { useEffect, useState } from 'react';
 import StatCard from './StatCard';
 import SimpleBar from './SimpleBar';
 
-
-
 type Summary = {
   ledger: {
     mtd: number;
