@@ -17,7 +17,9 @@ export default function SimpleBar({ data }: { data: Item[] }) {
               title={`${d.value}`}
             />
           </div>
-          <div className="w-16 text-right text-xs tabular-nums text-gray-700">{d.value.toFixed(2)}</div>
+          <div className="w-16 text-right text-xs tabular-nums text-gray-700">
+            {d.value.toFixed(2)}
+          </div>
         </div>
       ))}
     </div>
