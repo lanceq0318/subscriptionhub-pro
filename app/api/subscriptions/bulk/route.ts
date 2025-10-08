@@ -21,15 +21,23 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'No valid ids' }, { status: 400 });
     }
 
-    // Ensure the idList is formatted correctly for PostgreSQL (text array).
-    const idListStr = idList.map(String).join(',');
+    // Convert the idList into a string that PostgreSQL can use with ANY()
+    const idListStr = idList.join(',');
 
     if (body.type === 'delete') {
-      // Use SQL queries with formatted idList
-      await sql`DELETE FROM payments WHERE subscription_id = ANY(${sql.array(idList, 'int4')})`;
-      await sql`DELETE FROM attachments WHERE subscription_id = ANY(${sql.array(idList, 'int4')})`;
-      await sql`DELETE FROM subscription_tags WHERE subscription_id = ANY(${sql.array(idList, 'int4')})`;
-      await sql`DELETE FROM subscriptions WHERE id = ANY(${sql.array(idList, 'int4')})`;
+      // Directly using the raw query for integer arrays with ANY()
+      await sql`
+        DELETE FROM payments WHERE subscription_id = ANY(ARRAY[${idListStr}]::int[])
+      `;
+      await sql`
+        DELETE FROM attachments WHERE subscription_id = ANY(ARRAY[${idListStr}]::int[])
+      `;
+      await sql`
+        DELETE FROM subscription_tags WHERE subscription_id = ANY(ARRAY[${idListStr}]::int[])
+      `;
+      await sql`
+        DELETE FROM subscriptions WHERE id = ANY(ARRAY[${idListStr}]::int[])
+      `;
       return NextResponse.json({ success: true, count: idList.length });
     }
 
@@ -37,7 +45,7 @@ export async function POST(req: Request) {
       await sql`
         UPDATE subscriptions
         SET status = ${body.status}, updated_at = NOW()
-        WHERE id = ANY(${sql.array(idList, 'int4')})
+        WHERE id = ANY(ARRAY[${idListStr}]::int[])
       `;
       return NextResponse.json({ success: true, count: idList.length });
     }
@@ -52,7 +60,7 @@ export async function POST(req: Request) {
     if (body.type === 'removeTag') {
       await sql`
         DELETE FROM subscription_tags
-        WHERE subscription_id = ANY(${sql.array(idList, 'int4')}) AND tag = ${body.tag}
+        WHERE subscription_id = ANY(ARRAY[${idListStr}]::int[]) AND tag = ${body.tag}
       `;
       return NextResponse.json({ success: true, count: idList.length });
     }
