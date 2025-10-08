@@ -1,7 +1,7 @@
 'use client';
 import React, { useEffect, useState } from 'react';
-import StatCard from '@/app/components/StatCard';
-import SimpleBar from '@/app/components/SimpleBar';
+import StatCard from '@/app/analytics/StatCard';
+import SimpleBar from '@/app/analytics/SimpleBar';
 
 
 type Summary = {
