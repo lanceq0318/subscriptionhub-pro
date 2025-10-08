@@ -1,9 +1,3 @@
-// NOTE: This file is no longer used. The canonical NextAuth config lives at:
-// app/api/auth/[...nextauth]/route.ts
-// You may safely delete this file to avoid confusion.
-//
-// If you prefer a single source of truth, you can import and export the same options here:
-
 import type { NextAuthOptions } from "next-auth";
 import AzureADProvider from "next-auth/providers/azure-ad";
 
@@ -23,8 +17,8 @@ export const authOptions: NextAuthOptions = {
     },
     async session({ session, token }) {
       if (session.user) {
-        // @ts-expect-error augmenting with id
-        session.user.id = (token as any).id || token.sub || '';
+        // Ensure user.id exists without suppressing TS errors
+        (session.user as any).id = (token as any).id || token.sub || "";
       }
       return session;
     },
