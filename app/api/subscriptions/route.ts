@@ -128,7 +128,7 @@ export async function GET(request: Request) {
   }
 }
 
-// POST handler remains unchanged
+// Handle POST requests for subscription creation
 export async function POST(request: Request) {
   try {
     const json = await parseJson<any>(request);
@@ -143,7 +143,7 @@ export async function POST(request: Request) {
       status, paymentMethod, tags, notes,
     } = parsed.data;
 
-    // Insert a new subscription
+    // Insert the subscription
     const result = await sql<{ id: number }>`
       INSERT INTO subscriptions (
         company, service, cost, billing, next_billing, contract_end,
@@ -158,17 +158,15 @@ export async function POST(request: Request) {
       )
       RETURNING id
     `;
-
     const id = result.rows[0].id;
 
-    // Insert tags for the subscription
+    // Insert tags associated with the new subscription
     if (Array.isArray(tags) && tags.length > 0) {
-      for (const tag of tags) {
-        await sql`
-          INSERT INTO subscription_tags (subscription_id, tag)
-          VALUES (${id}, ${tag})
-        `;
-      }
+      const tagInserts = tags.map(tag => sql`
+        INSERT INTO subscription_tags (subscription_id, tag)
+        VALUES (${id}, ${tag})
+      `);
+      await Promise.all(tagInserts); // Use Promise.all to insert tags in parallel
     }
 
     return NextResponse.json({ id }, { status: 201 });
