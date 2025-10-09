@@ -4,6 +4,7 @@ export const BillingEnum = z.enum(['monthly','quarterly','yearly']);
 export const StatusEnum = z.enum(['active','pending','cancelled']);
 export const PaymentStatusEnum = z.enum(['paid','pending','overdue']);
 export const AttachmentTypeEnum = z.enum(['contract','invoice','other']);
+export const PricingTypeEnum = z.enum(['fixed', 'variable']); // Added pricingType enum
 
 const stringOrNull = z.string().trim().min(1).optional().nullable();
 const optionalISODate = z.string().datetime().optional().nullable();
@@ -26,6 +27,13 @@ export const SubscriptionCreateSchema = z.object({
   paymentMethod: stringOrNull,
   tags: z.array(z.string().trim().min(1)).max(15).optional(),
   notes: z.string().optional().nullable(),
+  pricingType: PricingTypeEnum.default('fixed'), // Added pricingType validation
+  department: stringOrNull,
+  costCenter: stringOrNull,
+  vendor: stringOrNull,
+  accountNumber: stringOrNull,
+  autoRenew: z.boolean().default(false),
+  budget: money.default(0),
 });
 
 export const SubscriptionUpdateSchema = SubscriptionCreateSchema.partial().extend({
