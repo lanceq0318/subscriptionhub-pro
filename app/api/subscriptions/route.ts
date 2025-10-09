@@ -1,4 +1,4 @@
-import { sql } from '@vercel/postgres';  // Vercel's Postgres client
+import { sql } from '@vercel/postgres'; // Vercel's Postgres client
 import { NextResponse } from 'next/server';
 import { SubscriptionCreateSchema, parseJson } from '@/app/lib/validation';
 
@@ -32,7 +32,7 @@ export async function GET(request: Request) {
       sortKey === 'contract_end' ? (order === 'asc' ? sql`ORDER BY s.contract_end ASC` : sql`ORDER BY s.contract_end DESC`) :
                                    (order === 'asc' ? sql`ORDER BY s.created_at ASC`   : sql`ORDER BY s.created_at DESC`);
 
-    // Fetch the subscriptions
+    // Fetch the subscriptions from the database
     const { rows } = await sql<any>`
       SELECT 
         s.id,
