@@ -1,8 +1,6 @@
 import { sql } from '@vercel/postgres';
 import { NextResponse } from 'next/server';
 import { SubscriptionCreateSchema, parseJson } from '@/app/lib/validation';
-import { IncomingForm } from 'formidable'; // Import formidable for file handling
-import fs from 'fs'; // Required for file system access (for Vercel or local testing)
 
 export async function GET(request: Request) {
   try {
@@ -13,6 +11,7 @@ export async function GET(request: Request) {
     const sort = (url.searchParams.get('sort') || 'created_at').toLowerCase();
     const order = (url.searchParams.get('order') || 'desc').toLowerCase() === 'asc' ? 'ASC' : 'DESC';
 
+    // Sanitize sort to known columns (prevents injection)
     const validSortColumns = [
       'company',
       'service',
@@ -25,6 +24,7 @@ export async function GET(request: Request) {
     ];
     const sortKey = validSortColumns.includes(sort) ? sort : 'created_at';
 
+    // Build WHERE conditions as an array of strings with placeholders
     const whereConditions: string[] = [];
     const whereParams: any[] = [];
     if (q) {
@@ -42,9 +42,13 @@ export async function GET(request: Request) {
       whereParams.push(tag);
     }
 
+    // Construct the WHERE clause string
     const whereClause = whereConditions.length ? `WHERE ${whereConditions.join(' AND ')}` : '';
+
+    // Construct the ORDER BY clause string (safe due to validation)
     const orderByClause = `ORDER BY s.${sortKey} ${order}`;
 
+    // Build full query text as string
     const queryText = `
       SELECT 
         s.id,
@@ -62,6 +66,7 @@ export async function GET(request: Request) {
         s.notes,
         s.created_at        AS "createdAt",
         s.updated_at        AS "updatedAt",
+        -- latest payment (status + date)
         lp.status           AS "lastPaymentStatus",
         lp.payment_date     AS "lastPaymentDate",
         ARRAY_AGG(DISTINCT t.tag) FILTER (WHERE t.tag IS NOT NULL) AS "tags",
@@ -77,6 +82,7 @@ export async function GET(request: Request) {
           )) FILTER (WHERE p.id IS NOT NULL),
           '[]'::json
         ) AS "payments",
+        -- derived status (auto)
         CASE
           WHEN s.status = 'cancelled' THEN 'cancelled'
           WHEN s.next_billing IS NOT NULL AND s.next_billing::date < CURRENT_DATE THEN 'overdue'
@@ -99,8 +105,10 @@ export async function GET(request: Request) {
       ${orderByClause}
     `;
 
+    // Execute the query with parameters
     const result = await sql.query(queryText, whereParams);
 
+    // Normalize the response
     const normalized = result.rows.map((s: any) => ({
       ...s,
       cost: typeof s.cost === 'string' ? Number(s.cost) : s.cost,
@@ -120,25 +128,14 @@ export async function GET(request: Request) {
   }
 }
 
+// POST handler without file upload logic
 export async function POST(request: Request) {
   try {
-    // Handle file uploads and data parsing
-    const form = new IncomingForm();
-    const { fields, files } = await new Promise<{ fields: any; files: any }>((resolve, reject) => {
-      form.parse(request, (err, fields, files) => {
-        if (err) reject(err);
-        resolve({ fields, files });
-      });
-    });
-
-    // Parse the JSON data for subscription creation
-    const json = JSON.parse(fields.data as string);
+    const json = await parseJson<any>(request);
     const parsed = SubscriptionCreateSchema.safeParse(json);
-
     if (!parsed.success) {
       return NextResponse.json({ error: 'Invalid payload', details: parsed.error.flatten() }, { status: 400 });
     }
-
     const {
       company, service, cost, billing,
       nextBilling, contractEnd,
@@ -146,8 +143,8 @@ export async function POST(request: Request) {
       status, paymentMethod, tags, notes,
     } = parsed.data;
 
-    // Insert the subscription data into the database
-    const result = await sql<{ id: number }>`
+    // Insert a new subscription without handling file uploads
+    const result = await sql<{ id: number }>` 
       INSERT INTO subscriptions (
         company, service, cost, billing, next_billing, contract_end,
         category, manager, renewal_alert, status, payment_method,
@@ -161,27 +158,17 @@ export async function POST(request: Request) {
       )
       RETURNING id
     `;
+
     const id = result.rows[0].id;
 
     // Insert tags for the subscription
     if (Array.isArray(tags) && tags.length > 0) {
-      const tagInserts = tags.map(tag => sql`
-        INSERT INTO subscription_tags (subscription_id, tag)
-        VALUES (${id}, ${tag})
-      `);
-      await Promise.all(tagInserts); // Insert tags in parallel
-    }
-
-    // Handle file uploads if files exist
-    if (files && files.file && Array.isArray(files.file)) {
-      const fileUploads = files.file.map(async (file: any) => {
-        // Example: Save file path to a database table (or other handling mechanism)
+      for (const tag of tags) {
         await sql`
-          INSERT INTO attachments (subscription_id, file_path)
-          VALUES (${id}, ${file.filepath})
+          INSERT INTO subscription_tags (subscription_id, tag)
+          VALUES (${id}, ${tag})
         `;
-      });
-      await Promise.all(fileUploads); // Handle multiple file uploads in parallel
+      }
     }
 
     return NextResponse.json({ id }, { status: 201 });
