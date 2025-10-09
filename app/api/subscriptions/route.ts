@@ -33,7 +33,7 @@ export async function GET(request: Request) {
                                    (order === 'asc' ? sql`ORDER BY s.created_at ASC`   : sql`ORDER BY s.created_at DESC`);
 
     // Fetch the subscriptions from the database
-    const { rows } = await sql<any>`
+    const result = await sql<any>`
       SELECT 
         s.id,
         s.company,
@@ -90,7 +90,7 @@ export async function GET(request: Request) {
     `;
 
     // Normalize the response
-    const normalized = rows.map((s: any) => ({
+    const normalized = result.rows.map((s: any) => ({
       ...s,
       cost: typeof s.cost === 'string' ? Number(s.cost) : s.cost,
       attachmentCount: Number(s.attachmentCount ?? 0),
@@ -124,7 +124,7 @@ export async function POST(request: Request) {
     } = parsed.data;
 
     // Insert a new subscription
-    const { rows } = await sql<{ id: number }>`
+    const result = await sql<{ id: number }>`
       INSERT INTO subscriptions (
         company, service, cost, billing, next_billing, contract_end,
         category, manager, renewal_alert, status, payment_method,
@@ -139,7 +139,7 @@ export async function POST(request: Request) {
       RETURNING id
     `;
 
-    const id = rows[0].id;
+    const id = result.rows[0].id;
 
     // Insert tags for the subscription
     if (Array.isArray(tags) && tags.length > 0) {
