@@ -1,6 +1,7 @@
 import { sql } from '@vercel/postgres';
 import { NextResponse } from 'next/server';
 import { SubscriptionCreateSchema, parseJson } from '@/app/lib/validation';
+import { IncomingForm } from 'formidable'; // Handling file uploads
 
 export async function GET(request: Request) {
   try {
@@ -11,7 +12,7 @@ export async function GET(request: Request) {
     const sort = (url.searchParams.get('sort') || 'created_at').toLowerCase();
     const order = (url.searchParams.get('order') || 'desc').toLowerCase() === 'asc' ? 'ASC' : 'DESC';
 
-    // Sanitize sort to known columns (prevents injection)
+    // Sanitize sort to known columns
     const validSortColumns = [
       'company',
       'service',
@@ -24,7 +25,6 @@ export async function GET(request: Request) {
     ];
     const sortKey = validSortColumns.includes(sort) ? sort : 'created_at';
 
-    // Build WHERE conditions as an array of strings with placeholders
     const whereConditions: string[] = [];
     const whereParams: any[] = [];
     if (q) {
@@ -42,13 +42,9 @@ export async function GET(request: Request) {
       whereParams.push(tag);
     }
 
-    // Construct the WHERE clause string
     const whereClause = whereConditions.length ? `WHERE ${whereConditions.join(' AND ')}` : '';
-
-    // Construct the ORDER BY clause string (safe due to validation)
     const orderByClause = `ORDER BY s.${sortKey} ${order}`;
 
-    // Build full query text as string
     const queryText = `
       SELECT 
         s.id,
@@ -66,7 +62,6 @@ export async function GET(request: Request) {
         s.notes,
         s.created_at        AS "createdAt",
         s.updated_at        AS "updatedAt",
-        -- latest payment (status + date)
         lp.status           AS "lastPaymentStatus",
         lp.payment_date     AS "lastPaymentDate",
         ARRAY_AGG(DISTINCT t.tag) FILTER (WHERE t.tag IS NOT NULL) AS "tags",
@@ -82,7 +77,6 @@ export async function GET(request: Request) {
           )) FILTER (WHERE p.id IS NOT NULL),
           '[]'::json
         ) AS "payments",
-        -- derived status (auto)
         CASE
           WHEN s.status = 'cancelled' THEN 'cancelled'
           WHEN s.next_billing IS NOT NULL AND s.next_billing::date < CURRENT_DATE THEN 'overdue'
@@ -105,10 +99,8 @@ export async function GET(request: Request) {
       ${orderByClause}
     `;
 
-    // Execute the query with parameters
     const result = await sql.query(queryText, whereParams);
 
-    // Normalize the response
     const normalized = result.rows.map((s: any) => ({
       ...s,
       cost: typeof s.cost === 'string' ? Number(s.cost) : s.cost,
@@ -128,14 +120,26 @@ export async function GET(request: Request) {
   }
 }
 
-// Handle POST requests for subscription creation
+// Handle POST requests for creating a new subscription with optional file uploads
 export async function POST(request: Request) {
   try {
-    const json = await parseJson<any>(request);
+    // Parse form data (including files)
+    const form = new IncomingForm();
+    const { fields, files } = await new Promise((resolve, reject) => {
+      form.parse(request, (err, fields, files) => {
+        if (err) reject(err);
+        resolve({ fields, files });
+      });
+    });
+
+    // Parse the JSON body
+    const json = JSON.parse(fields.data as string);
     const parsed = SubscriptionCreateSchema.safeParse(json);
+
     if (!parsed.success) {
       return NextResponse.json({ error: 'Invalid payload', details: parsed.error.flatten() }, { status: 400 });
     }
+
     const {
       company, service, cost, billing,
       nextBilling, contractEnd,
@@ -167,6 +171,19 @@ export async function POST(request: Request) {
         VALUES (${id}, ${tag})
       `);
       await Promise.all(tagInserts); // Use Promise.all to insert tags in parallel
+    }
+
+    // Handle file uploads (if files exist)
+    if (files && files.file && Array.isArray(files.file)) {
+      // Upload each file to your preferred file storage solution
+      const fileUploads = files.file.map(async (file: any) => {
+        // Here we simply assume file path/URL upload logic
+        await sql`
+          INSERT INTO attachments (subscription_id, file_path)
+          VALUES (${id}, ${file.filepath})
+        `;
+      });
+      await Promise.all(fileUploads);
     }
 
     return NextResponse.json({ id }, { status: 201 });
