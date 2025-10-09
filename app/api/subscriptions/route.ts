@@ -21,20 +21,18 @@ export async function GET(request: Request) {
     if (status) whereParts.push(sql`(s.status = ${status})`);
     if (tag) whereParts.push(sql`EXISTS (SELECT 1 FROM subscription_tags tt WHERE tt.subscription_id = s.id AND tt.tag = ${tag})`);
     
-    // If there are where conditions, concatenate them
     const where = whereParts.length ? sql`WHERE ${whereParts.reduce((acc, part, i) => i ? sql`${acc} AND ${part}` : part)}` : sql``;
 
-    // Choose an ORDER BY clause safely
-    const orderBy =
-      sortKey === 'company'      ? (order === 'asc' ? sql`ORDER BY s.company ASC`      : sql`ORDER BY s.company DESC`) :
-      sortKey === 'service'      ? (order === 'asc' ? sql`ORDER BY s.service ASC`      : sql`ORDER BY s.service DESC`) :
-      sortKey === 'cost'         ? (order === 'asc' ? sql`ORDER BY s.cost ASC`         : sql`ORDER BY s.cost DESC`) :
-      sortKey === 'billing'      ? (order === 'asc' ? sql`ORDER BY s.billing ASC`      : sql`ORDER BY s.billing DESC`) :
-      sortKey === 'next_billing' ? (order === 'asc' ? sql`ORDER BY s.next_billing ASC` : sql`ORDER BY s.next_billing DESC`) :
-      sortKey === 'contract_end' ? (order === 'asc' ? sql`ORDER BY s.contract_end ASC` : sql`ORDER BY s.contract_end DESC`) :
-                                   (order === 'asc' ? sql`ORDER BY s.created_at ASC`   : sql`ORDER BY s.created_at DESC`);
+    // Order by clause logic
+    const orderBy = sortKey === 'company'      ? (order === 'asc' ? sql`ORDER BY s.company ASC`      : sql`ORDER BY s.company DESC`) :
+                    sortKey === 'service'      ? (order === 'asc' ? sql`ORDER BY s.service ASC`      : sql`ORDER BY s.service DESC`) :
+                    sortKey === 'cost'         ? (order === 'asc' ? sql`ORDER BY s.cost ASC`         : sql`ORDER BY s.cost DESC`) :
+                    sortKey === 'billing'      ? (order === 'asc' ? sql`ORDER BY s.billing ASC`      : sql`ORDER BY s.billing DESC`) :
+                    sortKey === 'next_billing' ? (order === 'asc' ? sql`ORDER BY s.next_billing ASC` : sql`ORDER BY s.next_billing DESC`) :
+                    sortKey === 'contract_end' ? (order === 'asc' ? sql`ORDER BY s.contract_end ASC` : sql`ORDER BY s.contract_end DESC`) :
+                    (order === 'asc' ? sql`ORDER BY s.created_at ASC`   : sql`ORDER BY s.created_at DESC`);
 
-    // Execute SQL query
+    // Execute the query
     const { rows } = await sql<any>`
       SELECT 
         s.id,
