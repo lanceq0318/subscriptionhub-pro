@@ -128,40 +128,50 @@ export async function GET(request: Request) {
   }
 }
 
-// POST handler without file upload logic
 export async function POST(request: Request) {
   try {
+    // Parse incoming JSON request body
     const json = await parseJson<any>(request);
+    
+    // Validate the data
     const parsed = SubscriptionCreateSchema.safeParse(json);
     if (!parsed.success) {
       return NextResponse.json({ error: 'Invalid payload', details: parsed.error.flatten() }, { status: 400 });
     }
+
+    // Extract subscription data from parsed request
     const {
       company, service, cost, billing,
       nextBilling, contractEnd,
       category, manager, renewalAlert,
       status, paymentMethod, tags, notes,
+      pricingType, department, costCenter,
+      vendor, accountNumber, autoRenew, budget,
     } = parsed.data;
 
-    // Insert a new subscription without handling file uploads
-    const result = await sql<{ id: number }>` 
+    // Insert the subscription into the subscriptions table
+    const result = await sql<{ id: number }>`
       INSERT INTO subscriptions (
         company, service, cost, billing, next_billing, contract_end,
         category, manager, renewal_alert, status, payment_method,
-        notes, last_payment_status
+        notes, last_payment_status, pricing_type, department,
+        cost_center, vendor, account_number, auto_renew, budget
       ) VALUES (
         ${company}, ${service}, ${cost}, ${billing},
         ${nextBilling || null}, ${contractEnd || null},
         ${category || null}, ${manager || null}, ${renewalAlert ?? 30},
         ${status || 'active'}, ${paymentMethod || null},
-        ${notes || null}, 'pending'
+        ${notes || null}, 'pending', ${pricingType || 'fixed'},
+        ${department || null}, ${costCenter || null}, ${vendor || null},
+        ${accountNumber || null}, ${autoRenew ?? false}, ${budget || 0}
       )
       RETURNING id
     `;
-
+    
+    // Retrieve the inserted subscription ID
     const id = result.rows[0].id;
 
-    // Insert tags for the subscription
+    // Insert tags if they are provided
     if (Array.isArray(tags) && tags.length > 0) {
       for (const tag of tags) {
         await sql`
@@ -171,6 +181,7 @@ export async function POST(request: Request) {
       }
     }
 
+    // Return the response with the created subscription's ID
     return NextResponse.json({ id }, { status: 201 });
   } catch (error) {
     console.error('Error creating subscription:', error);
