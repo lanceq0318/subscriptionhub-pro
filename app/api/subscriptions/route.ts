@@ -1,7 +1,8 @@
 import { sql } from '@vercel/postgres';
 import { NextResponse } from 'next/server';
 import { SubscriptionCreateSchema, parseJson } from '@/app/lib/validation';
-import { IncomingForm } from 'formidable'; // Handling file uploads
+import { IncomingForm } from 'formidable'; // Import formidable for file handling
+import fs from 'fs'; // Required for file system access (for Vercel or local testing)
 
 export async function GET(request: Request) {
   try {
@@ -12,7 +13,6 @@ export async function GET(request: Request) {
     const sort = (url.searchParams.get('sort') || 'created_at').toLowerCase();
     const order = (url.searchParams.get('order') || 'desc').toLowerCase() === 'asc' ? 'ASC' : 'DESC';
 
-    // Sanitize sort to known columns
     const validSortColumns = [
       'company',
       'service',
@@ -120,19 +120,18 @@ export async function GET(request: Request) {
   }
 }
 
-// Handle POST requests for creating a new subscription with optional file uploads
 export async function POST(request: Request) {
   try {
-    // Parse form data (including files)
+    // Handle file uploads and data parsing
     const form = new IncomingForm();
-    const { fields, files } = await new Promise((resolve, reject) => {
+    const { fields, files } = await new Promise<{ fields: any; files: any }>((resolve, reject) => {
       form.parse(request, (err, fields, files) => {
         if (err) reject(err);
         resolve({ fields, files });
       });
     });
 
-    // Parse the JSON body
+    // Parse the JSON data for subscription creation
     const json = JSON.parse(fields.data as string);
     const parsed = SubscriptionCreateSchema.safeParse(json);
 
@@ -147,7 +146,7 @@ export async function POST(request: Request) {
       status, paymentMethod, tags, notes,
     } = parsed.data;
 
-    // Insert the subscription
+    // Insert the subscription data into the database
     const result = await sql<{ id: number }>`
       INSERT INTO subscriptions (
         company, service, cost, billing, next_billing, contract_end,
@@ -164,26 +163,25 @@ export async function POST(request: Request) {
     `;
     const id = result.rows[0].id;
 
-    // Insert tags associated with the new subscription
+    // Insert tags for the subscription
     if (Array.isArray(tags) && tags.length > 0) {
       const tagInserts = tags.map(tag => sql`
         INSERT INTO subscription_tags (subscription_id, tag)
         VALUES (${id}, ${tag})
       `);
-      await Promise.all(tagInserts); // Use Promise.all to insert tags in parallel
+      await Promise.all(tagInserts); // Insert tags in parallel
     }
 
-    // Handle file uploads (if files exist)
+    // Handle file uploads if files exist
     if (files && files.file && Array.isArray(files.file)) {
-      // Upload each file to your preferred file storage solution
       const fileUploads = files.file.map(async (file: any) => {
-        // Here we simply assume file path/URL upload logic
+        // Example: Save file path to a database table (or other handling mechanism)
         await sql`
           INSERT INTO attachments (subscription_id, file_path)
           VALUES (${id}, ${file.filepath})
         `;
       });
-      await Promise.all(fileUploads);
+      await Promise.all(fileUploads); // Handle multiple file uploads in parallel
     }
 
     return NextResponse.json({ id }, { status: 201 });
