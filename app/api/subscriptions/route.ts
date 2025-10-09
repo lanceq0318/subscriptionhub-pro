@@ -1,4 +1,4 @@
-import { sql } from '@vercel/postgres'; // Vercel's Postgres client
+import { sql } from '@vercel/postgres';
 import { NextResponse } from 'next/server';
 import { SubscriptionCreateSchema, parseJson } from '@/app/lib/validation';
 
@@ -7,33 +7,49 @@ export async function GET(request: Request) {
     const url = new URL(request.url);
     const q = url.searchParams.get('q')?.trim();
     const tag = url.searchParams.get('tag')?.trim();
-    const status = url.searchParams.get('status')?.trim() as 'active'|'pending'|'cancelled'|null;
+    const status = url.searchParams.get('status')?.trim() as 'active' | 'pending' | 'cancelled' | null;
     const sort = (url.searchParams.get('sort') || 'created_at').toLowerCase();
-    const order = (url.searchParams.get('order') || 'desc').toLowerCase() === 'asc' ? 'asc' : 'desc';
+    const order = (url.searchParams.get('order') || 'desc').toLowerCase() === 'asc' ? 'ASC' : 'DESC';
 
     // Sanitize sort to known columns
-    const sortKey = ['company','service','cost','billing','next_billing','created_at','updated_at','contract_end'].includes(sort)
-      ? sort : 'created_at';
+    const validSortColumns = [
+      'company',
+      'service',
+      'cost',
+      'billing',
+      'next_billing',
+      'created_at',
+      'updated_at',
+      'contract_end',
+    ];
+    const sortKey = validSortColumns.includes(sort) ? sort : 'created_at';
 
-    // Build WHERE conditions (composable, no raw strings)
-    const whereParts: any[] = [];
-    if (q) whereParts.push(sql`(s.company ILIKE ${'%' + q + '%'} OR s.service ILIKE ${'%' + q + '%'})`);
-    if (status) whereParts.push(sql`(s.status = ${status})`);
-    if (tag) whereParts.push(sql`EXISTS (SELECT 1 FROM subscription_tags tt WHERE tt.subscription_id = s.id AND tt.tag = ${tag})`);
-    const where = whereParts.length ? sql`WHERE ${whereParts.reduce((acc, part, i) => i ? sql`${acc} AND ${part}` : part)}` : sql``;
+    // Build WHERE conditions as an array of strings
+    const whereConditions: string[] = [];
+    const whereParams: any[] = [];
+    if (q) {
+      whereConditions.push(`(s.company ILIKE $${whereParams.length + 1} OR s.service ILIKE $${whereParams.length + 1})`);
+      whereParams.push(`%${q}%`);
+    }
+    if (status) {
+      whereConditions.push(`s.status = $${whereParams.length + 1}`);
+      whereParams.push(status);
+    }
+    if (tag) {
+      whereConditions.push(
+        `EXISTS (SELECT 1 FROM subscription_tags tt WHERE tt.subscription_id = s.id AND tt.tag = $${whereParams.length + 1})`
+      );
+      whereParams.push(tag);
+    }
 
-    // Choose an ORDER BY clause safely
-    const orderBy =
-      sortKey === 'company'      ? (order === 'asc' ? sql`ORDER BY s.company ASC`      : sql`ORDER BY s.company DESC`) :
-      sortKey === 'service'      ? (order === 'asc' ? sql`ORDER BY s.service ASC`      : sql`ORDER BY s.service DESC`) :
-      sortKey === 'cost'         ? (order === 'asc' ? sql`ORDER BY s.cost ASC`         : sql`ORDER BY s.cost DESC`) :
-      sortKey === 'billing'      ? (order === 'asc' ? sql`ORDER BY s.billing ASC`      : sql`ORDER BY s.billing DESC`) :
-      sortKey === 'next_billing' ? (order === 'asc' ? sql`ORDER BY s.next_billing ASC` : sql`ORDER BY s.next_billing DESC`) :
-      sortKey === 'contract_end' ? (order === 'asc' ? sql`ORDER BY s.contract_end ASC` : sql`ORDER BY s.contract_end DESC`) :
-                                   (order === 'asc' ? sql`ORDER BY s.created_at ASC`   : sql`ORDER BY s.created_at DESC`);
+    // Construct the WHERE clause
+    const whereClause = whereConditions.length ? `WHERE ${whereConditions.join(' AND ')}` : '';
+
+    // Construct the ORDER BY clause
+    const orderByClause = `ORDER BY s.${sortKey} ${order}`;
 
     // Fetch the subscriptions from the database
-    const result = await sql<any>`
+    const result = await sql`
       SELECT 
         s.id,
         s.company,
@@ -84,9 +100,9 @@ export async function GET(request: Request) {
         ORDER BY payment_date DESC, id DESC
         LIMIT 1
       ) lp ON TRUE
-      ${where}
+      ${whereClause ? sql`${whereClause}` : sql``}
       GROUP BY s.id, lp.status, lp.payment_date
-      ${orderBy}
+      ${sql`${orderByClause}`}
     `;
 
     // Normalize the response
@@ -109,6 +125,7 @@ export async function GET(request: Request) {
   }
 }
 
+// POST handler remains unchanged
 export async function POST(request: Request) {
   try {
     const json = await parseJson<any>(request);
