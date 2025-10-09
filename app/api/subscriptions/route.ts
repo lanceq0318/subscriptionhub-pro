@@ -2,25 +2,33 @@ import { sql } from '@vercel/postgres';
 import { NextResponse } from 'next/server';
 import { SubscriptionCreateSchema, parseJson } from '@/app/lib/validation';
 
+// Be explicit: ensure Node runtime on Vercel
+export const runtime = 'nodejs';
+
 export async function GET(request: Request) {
   try {
     const url = new URL(request.url);
-    const q = url.searchParams.get('q')?.trim() || null;
+    const qRaw = url.searchParams.get('q')?.trim() || null;
     const tag = url.searchParams.get('tag')?.trim() || null;
-    const statusParam = (url.searchParams.get('status')?.trim() as 'active'|'pending'|'cancelled' | null) || null;
 
-    // sanitize sort + order
-    const sort = (url.searchParams.get('sort') || 'created_at').toLowerCase();
+    // Normalize status: allow "active|pending|cancelled|overdue|all"
+    const statusRaw = url.searchParams.get('status')?.trim()?.toLowerCase() || null;
+    const isOverdue = statusRaw === 'overdue';
+    const statusNormalized =
+      statusRaw && ['active', 'pending', 'cancelled'].includes(statusRaw)
+        ? (statusRaw as 'active' | 'pending' | 'cancelled')
+        : null; // 'all' or unknown -> no direct status filter
+
+    // Sorting
+    const sortRaw = (url.searchParams.get('sort') || 'created_at').toLowerCase();
     const order = (url.searchParams.get('order') || 'desc').toLowerCase() === 'asc' ? 'asc' : 'desc';
     const allowedSorts = new Set([
-      'company','service','cost','billing','next_billing','created_at','updated_at','contract_end'
+      'company', 'service', 'cost', 'billing', 'next_billing', 'created_at', 'updated_at', 'contract_end',
     ]);
-    const sortKey = allowedSorts.has(sort) ? sort : 'created_at';
+    const sortKey = allowedSorts.has(sortRaw) ? sortRaw : 'created_at';
 
-    // values used in WHERE
-    const qLike = q ? `%${q}%` : null;
+    const qLike = qRaw ? `%${qRaw}%` : null;
 
-    // Single, parameterized query — no nested sql fragments
     const { rows } = await sql<any>`
       SELECT 
         s.id,
@@ -74,10 +82,10 @@ export async function GET(request: Request) {
       ) lp ON TRUE
       WHERE
         ( ${qLike} IS NULL OR (s.company ILIKE ${qLike} OR s.service ILIKE ${qLike}) )
-        AND ( ${statusParam} IS NULL OR s.status = ${statusParam} )
+        AND ( ${statusNormalized} IS NULL OR s.status = ${statusNormalized} )
+        AND ( ${isOverdue} = false OR (s.next_billing IS NOT NULL AND s.next_billing::date < CURRENT_DATE AND s.status <> 'cancelled') )
         AND ( ${tag} IS NULL OR EXISTS (
-              SELECT 1
-              FROM subscription_tags tt
+              SELECT 1 FROM subscription_tags tt
               WHERE tt.subscription_id = s.id AND tt.tag = ${tag}
             ))
       GROUP BY s.id, lp.status, lp.payment_date
@@ -100,7 +108,7 @@ export async function GET(request: Request) {
         CASE WHEN ${sortKey} = 'created_at'    AND ${order} = 'desc' THEN s.created_at   END DESC,
         CASE WHEN ${sortKey} = 'updated_at'    AND ${order} = 'asc'  THEN s.updated_at   END ASC,
         CASE WHEN ${sortKey} = 'updated_at'    AND ${order} = 'desc' THEN s.updated_at   END DESC,
-        -- deterministic tie-breaker
+        -- deterministic tiebreaker
         s.created_at DESC
     `;
 
@@ -128,8 +136,13 @@ export async function POST(request: Request) {
     const json = await parseJson<any>(request);
     const parsed = SubscriptionCreateSchema.safeParse(json);
     if (!parsed.success) {
-      return NextResponse.json({ error: 'Invalid payload', details: parsed.error.flatten() }, { status: 400 });
+      // surface zod errors to help the UI
+      return NextResponse.json(
+        { error: 'Invalid payload', details: parsed.error.flatten() },
+        { status: 400 },
+      );
     }
+
     const {
       company, service, cost, billing,
       nextBilling, contractEnd,
@@ -137,34 +150,36 @@ export async function POST(request: Request) {
       status, paymentMethod, tags, notes,
     } = parsed.data;
 
+    // Be defensive about number-ish inputs
+    const costNum = typeof cost === 'string' ? Number(cost) : cost;
+    const statusDb: 'active' | 'pending' | 'cancelled' =
+      (status && ['active', 'pending', 'cancelled'].includes(status)) ? status : 'active';
+
+    // NOTE: do NOT insert last_payment_status (avoids runtime SQL errors if column doesn't exist)
     const { rows } = await sql<{ id: number }>`
       INSERT INTO subscriptions (
         company, service, cost, billing, next_billing, contract_end,
-        category, manager, renewal_alert, status, payment_method,
-        notes, last_payment_status
+        category, manager, renewal_alert, status, payment_method, notes
       ) VALUES (
-        ${company}, ${service}, ${cost}, ${billing},
+        ${company}, ${service}, ${costNum ?? null}, ${billing},
         ${nextBilling || null}, ${contractEnd || null},
         ${category || null}, ${manager || null}, ${renewalAlert ?? 30},
-        ${status || 'active'}, ${paymentMethod || null},
-        ${notes || null}, 'pending'
+        ${statusDb}, ${paymentMethod || null}, ${notes || null}
       )
       RETURNING id
     `;
-    const id = rows[0].id;
+    const id = rows[0]?.id;
 
-    if (Array.isArray(tags) && tags.length > 0) {
+    if (id && Array.isArray(tags) && tags.length > 0) {
       for (const tag of tags) {
-        await sql`
-          INSERT INTO subscription_tags (subscription_id, tag)
-          VALUES (${id}, ${tag})
-        `;
+        await sql`INSERT INTO subscription_tags (subscription_id, tag) VALUES (${id}, ${tag})`;
       }
     }
 
     return NextResponse.json({ id }, { status: 201 });
-  } catch (error) {
+  } catch (error: any) {
     console.error('Error creating subscription:', error);
-    return NextResponse.json({ error: 'Failed to create subscription' }, { status: 500 });
+    const message = typeof error?.message === 'string' ? error.message : 'Failed to create subscription';
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }
