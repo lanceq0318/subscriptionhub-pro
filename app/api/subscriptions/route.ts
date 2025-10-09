@@ -12,7 +12,7 @@ export async function GET(request: Request) {
     const order = (url.searchParams.get('order') || 'desc').toLowerCase() === 'asc' ? 'asc' : 'desc';
 
     // Sanitize sort to known columns
-    const sortKey = ['company','service','cost','billing','next_billing','created_at','updated_at','contract_end'].includes(sort)
+    const sortKey = ['company', 'service', 'cost', 'billing', 'next_billing', 'created_at', 'updated_at', 'contract_end'].includes(sort)
       ? sort : 'created_at';
 
     // Build WHERE conditions (composable, no raw strings)
@@ -20,6 +20,8 @@ export async function GET(request: Request) {
     if (q) whereParts.push(sql`(s.company ILIKE ${'%' + q + '%'} OR s.service ILIKE ${'%' + q + '%'})`);
     if (status) whereParts.push(sql`(s.status = ${status})`);
     if (tag) whereParts.push(sql`EXISTS (SELECT 1 FROM subscription_tags tt WHERE tt.subscription_id = s.id AND tt.tag = ${tag})`);
+    
+    // If there are where conditions, concatenate them
     const where = whereParts.length ? sql`WHERE ${whereParts.reduce((acc, part, i) => i ? sql`${acc} AND ${part}` : part)}` : sql``;
 
     // Choose an ORDER BY clause safely
@@ -32,6 +34,7 @@ export async function GET(request: Request) {
       sortKey === 'contract_end' ? (order === 'asc' ? sql`ORDER BY s.contract_end ASC` : sql`ORDER BY s.contract_end DESC`) :
                                    (order === 'asc' ? sql`ORDER BY s.created_at ASC`   : sql`ORDER BY s.created_at DESC`);
 
+    // Execute SQL query
     const { rows } = await sql<any>`
       SELECT 
         s.id,
@@ -39,19 +42,18 @@ export async function GET(request: Request) {
         s.service,
         s.cost,
         s.billing,
-        s.next_billing      AS "nextBilling",
-        s.contract_end      AS "contractEnd",
+        s.next_billing AS "nextBilling",
+        s.contract_end AS "contractEnd",
         s.category,
         s.manager,
-        s.renewal_alert     AS "renewalAlert",
+        s.renewal_alert AS "renewalAlert",
         s.status,
-        s.payment_method    AS "paymentMethod",
+        s.payment_method AS "paymentMethod",
         s.notes,
-        s.created_at        AS "createdAt",
-        s.updated_at        AS "updatedAt",
-        -- latest payment (status + date)
-        lp.status           AS "lastPaymentStatus",
-        lp.payment_date     AS "lastPaymentDate",
+        s.created_at AS "createdAt",
+        s.updated_at AS "updatedAt",
+        lp.status AS "lastPaymentStatus",
+        lp.payment_date AS "lastPaymentDate",
         ARRAY_AGG(DISTINCT t.tag) FILTER (WHERE t.tag IS NOT NULL) AS "tags",
         COUNT(DISTINCT a.id) AS "attachmentCount",
         COALESCE(
@@ -65,7 +67,6 @@ export async function GET(request: Request) {
           )) FILTER (WHERE p.id IS NOT NULL),
           '[]'::json
         ) AS "payments",
-        -- derived status (auto)
         CASE
           WHEN s.status = 'cancelled' THEN 'cancelled'
           WHEN s.next_billing IS NOT NULL AND s.next_billing::date < CURRENT_DATE THEN 'overdue'
@@ -88,6 +89,7 @@ export async function GET(request: Request) {
       ${orderBy}
     `;
 
+    // Normalize the results
     const normalized = rows.map((s: any) => ({
       ...s,
       cost: typeof s.cost === 'string' ? Number(s.cost) : s.cost,
@@ -121,6 +123,7 @@ export async function POST(request: Request) {
       status, paymentMethod, tags, notes,
     } = parsed.data;
 
+    // Insert subscription
     const { rows } = await sql<{ id: number }>`
       INSERT INTO subscriptions (
         company, service, cost, billing, next_billing, contract_end,
@@ -137,6 +140,7 @@ export async function POST(request: Request) {
     `;
     const id = rows[0].id;
 
+    // Insert tags if available
     if (Array.isArray(tags) && tags.length > 0) {
       for (const tag of tags) {
         await sql`
